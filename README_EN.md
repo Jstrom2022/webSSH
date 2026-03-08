@@ -41,11 +41,6 @@ Frontend terminal dependencies are bundled as static resources:
 ├── build.sh                          # Build & package script
 ├── start.sh                          # Start/stop/restart management script
 ├── pom.xml                           # Maven configuration
-├── data/sessions/                    # Session data storage directory
-├── release/                          # Build output directory
-│   ├── webssh.jar
-│   ├── start.sh
-│   └── config/application.properties
 └── src/main/
     ├── java/com/webssh/
     │   ├── WebSshApplication.java    # Application entry point

@@ -41,11 +41,6 @@
 ├── build.sh                          # 构建打包脚本
 ├── start.sh                          # 启动/停止/重启管理脚本
 ├── pom.xml                           # Maven 配置
-├── data/sessions/                    # 会话数据存储目录
-├── release/                          # 构建产物目录
-│   ├── webssh.jar
-│   ├── start.sh
-│   └── config/application.properties
 └── src/main/
     ├── java/com/webssh/
     │   ├── WebSshApplication.java    # 启动入口
