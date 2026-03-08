@@ -85,7 +85,7 @@ Config file: [application.properties](src/main/resources/application.properties)
 
 ```bash
 # 1. Clone the repository
-git clone <repo-url> && cd vpsSSH
+git clone https://github.com/Jstrom2022/webSSH.git && cd webSSH
 
 # 2. Start the application (requires Java 17+ and Maven)
 mvn spring-boot:run

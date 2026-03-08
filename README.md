@@ -85,7 +85,7 @@
 
 ```bash
 # 1. 克隆项目
-git clone <repo-url> && cd vpsSSH
+git clone https://github.com/Jstrom2022/webSSH.git && cd webSSH
 
 # 2. 启动应用（需要 Java 17+ 和 Maven）
 mvn spring-boot:run
