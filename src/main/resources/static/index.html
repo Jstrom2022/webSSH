@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title data-i18n="page.index.title">WebSSH | Terminal</title>
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <!-- Styles -->
+    <link rel="stylesheet" href="/vendor/xterm/xterm.css">
+    <link rel="stylesheet" href="/style.css">
+</head>
+
+<body>
+    <div class="layout">
+        <div id="sidebarBackdrop" class="sidebar-backdrop"></div>
+        <aside class="sidebar">
+            <div class="sidebar-top">
+                <div class="sidebar-brand">
+                    <div class="brand-icon">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor"
+                            stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="4 17 10 11 4 5"></polyline>
+                            <line x1="12" y1="19" x2="20" y2="19"></line>
+                        </svg>
+                    </div>
+                    <h1>WebSSH</h1>
+                </div>
+                <div class="user-box">
+                    <div class="user-info">
+                        <div class="user-avatar" id="avatarLetter">A</div>
+                        <span id="currentUser">admin</span>
+                    </div>
+                    <form method="post" action="/logout">
+                        <button type="submit" class="small-btn" data-i18n-title="sidebar.logoutTitle" title="退出登录">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                                <polyline points="16 17 21 12 16 7"></polyline>
+                                <line x1="21" y1="12" x2="9" y2="12"></line>
+                            </svg>
+                            <span data-i18n="sidebar.logout">退出</span>
+                        </button>
+                    </form>
+                </div>
+                <div class="sidebar-settings-row">
+                    <label class="setting-inline" for="languageSelect" data-i18n-title="language.label" title="界面语言">
+                        <svg class="setting-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <line x1="2" y1="12" x2="22" y2="12"></line>
+                            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                        </svg>
+                        <select id="languageSelect" aria-label="Language"></select>
+                    </label>
+                    <label class="setting-inline" for="themeSelect" data-i18n-title="theme.label" title="终端配色">
+                        <span id="themeColorDot" class="theme-color-dot" style="background:#5cc8ff;"></span>
+                        <select id="themeSelect" aria-label="Terminal Theme">
+                            <option value="default" data-i18n="theme.default">默认（蓝）</option>
+                            <option value="orange" data-i18n="theme.orange">黑色 + 橙色</option>
+                            <option value="green" data-i18n="theme.green">黑色 + 绿色</option>
+                            <option value="amber" data-i18n="theme.amber">复古琥珀</option>
+                            <option value="purple" data-i18n="theme.purple">暗夜紫</option>
+                            <option value="red" data-i18n="theme.red">黑色 + 红色</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+
+            <section class="panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path>
+                        </svg>
+                        <span data-i18n="sidebar.savedSessions">已保存会话</span>
+                    </div>
+                    <button class="small-btn" id="openAddSessionBtn">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        <span data-i18n="common.add">添加</span>
+                    </button>
+                </div>
+                <div id="sessionList" class="session-list">
+                    <!-- Sessions will be injected here -->
+                    <div class="session-empty">
+                        <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor"
+                            stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.3">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                            <line x1="8" y1="21" x2="16" y2="21"></line>
+                            <line x1="12" y1="17" x2="12" y2="21"></line>
+                        </svg>
+                        <span data-i18n="sidebar.loadingSessions">正在加载会话...</span>
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+        <!-- Configuration Drawer (Drawer Mode) -->
+        <div id="configDrawer" class="config-drawer">
+            <div class="drawer-header">
+                <div class="drawer-title" id="drawerTitle">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path
+                            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">
+                        </path>
+                    </svg>
+                    <span data-i18n="drawer.sessionConfig">会话配置</span>
+                </div>
+                <button id="closeDrawerBtn" class="small-btn">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                    <span data-i18n="common.close">关闭</span>
+                </button>
+            </div>
+
+            <div class="drawer-body">
+                <!-- 基本信息卡片 -->
+                <div class="drawer-card">
+                    <div class="drawer-card-header">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+                            <line x1="8" y1="21" x2="16" y2="21"></line>
+                            <line x1="12" y1="17" x2="12" y2="21"></line>
+                        </svg>
+                        <span data-i18n="card.connectionInfo">连接信息</span>
+                    </div>
+                    <div class="drawer-card-body">
+                        <div class="form-group">
+                            <label data-i18n="form.sessionName">会话名</label>
+                            <input id="sessionName" type="text" data-i18n-placeholder="placeholder.sessionName"
+                                placeholder="例如：生产机-01" autocomplete="off">
+                        </div>
+                        <div class="form-row-host">
+                            <div class="form-group">
+                                <label data-i18n="form.host">主机地址</label>
+                                <input id="host" type="text" placeholder="192.168.1.10" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="form.port">端口</label>
+                                <input id="port" type="number" value="22">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 认证信息卡片 -->
+                <div class="drawer-card">
+                    <div class="drawer-card-header">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+                        </svg>
+                        <span data-i18n="card.authMethod">认证方式</span>
+                    </div>
+                    <div class="drawer-card-body">
+                        <div class="form-row-2">
+                            <div class="form-group">
+                                <label data-i18n="form.username">用户名</label>
+                                <input id="username" type="text" placeholder="root">
+                            </div>
+                            <div class="form-group">
+                                <label data-i18n="form.type">类型</label>
+                                <select id="authType">
+                                    <option value="PASSWORD" data-i18n="auth.password">密码</option>
+                                    <option value="PRIVATE_KEY" data-i18n="auth.privateKey">私钥</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="passwordGroup" class="form-group">
+                            <label data-i18n="form.password">密码</label>
+                            <div class="input-with-icon">
+                                <input id="password" type="password" data-i18n-placeholder="placeholder.enterPassword"
+                                    placeholder="请输入密码">
+                            </div>
+                        </div>
+                        <div id="keyGroup" class="form-group" style="display: none;">
+                            <label data-i18n="form.privateKey">私钥</label>
+                            <textarea id="privateKey" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+                            <label data-i18n="form.passphraseOptional">私钥口令 (可选)</label>
+                            <input id="passphrase" type="password">
+                        </div>
+                        <div class="form-group form-toggle-row">
+                            <div class="toggle-label">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                                </svg>
+                                <span data-i18n="form.saveEncryptedCredentials">保存加密凭据</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input id="saveCredentials" type="checkbox">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 安全信息卡片 -->
+                <div class="drawer-card drawer-card-subtle">
+                    <div class="drawer-card-header">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                        </svg>
+                        <span data-i18n="card.hostFingerprint">主机指纹</span>
+                    </div>
+                    <div class="drawer-card-body">
+                        <div class="fingerprint-display">
+                            <input id="hostFingerprint" type="text"
+                                data-i18n-placeholder="placeholder.hostFingerprint" placeholder="连接后自动获取" readonly>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 端口转发卡片 -->
+                <div class="drawer-card">
+                    <div class="drawer-card-header">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polyline points="16 3 21 3 21 8"></polyline>
+                            <line x1="4" y1="20" x2="21" y2="3"></line>
+                            <polyline points="21 16 21 21 16 21"></polyline>
+                            <line x1="15" y1="15" x2="21" y2="21"></line>
+                            <line x1="4" y1="4" x2="9" y2="9"></line>
+                        </svg>
+                        <span data-i18n="card.portForward">端口转发</span>
+                        <span class="card-badge" data-i18n="common.optional">可选</span>
+                    </div>
+                    <div class="drawer-card-body">
+                        <div class="form-group">
+                            <label data-i18n="form.direction">方向</label>
+                            <select id="forwardDirection">
+                                <option value="LOCAL" data-i18n="forward.local">本地转发（L）</option>
+                                <option value="REMOTE" data-i18n="forward.remote">远程转发（R）</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.listenAddressPort">监听地址 / 端口</label>
+                            <div class="grid-2">
+                                <input id="forwardBindHost" type="text" value="127.0.0.1">
+                                <input id="forwardBindPort" type="number" min="0" max="65535" value="0">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label data-i18n="form.targetAddressPort">目标地址 / 端口</label>
+                            <div class="grid-2">
+                                <input id="forwardTargetHost" type="text" placeholder="127.0.0.1">
+                                <input id="forwardTargetPort" type="number" min="1" max="65535" placeholder="3306">
+                            </div>
+                        </div>
+                        <div class="forward-actions">
+                            <button id="addForwardBtn" type="button" class="secondary">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                                </svg>
+                                <span data-i18n="common.create">新增</span>
+                            </button>
+                            <button id="refreshForwardBtn" type="button" class="secondary">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                <span data-i18n="common.refresh">刷新</span>
+                            </button>
+                        </div>
+                        <div id="forwardList" class="result-list">
+                            <div class="result-empty" data-i18n="empty.forwardAfterConnect">连接后可管理端口转发</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 固定底部操作栏 -->
+            <div class="drawer-footer">
+                <div class="drawer-footer-row">
+                    <button id="connectBtn" class="drawer-primary-btn">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M5 12h14"></path>
+                            <path d="M12 5l7 7-7 7"></path>
+                        </svg>
+                        <span data-i18n="buttons.connectSession">连接会话</span>
+                    </button>
+                    <button id="disconnectBtn" class="secondary" style="display: none;">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                        </svg>
+                        <span data-i18n="common.disconnect">断开</span>
+                    </button>
+                    <button id="saveSessionBtn" class="secondary">
+                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                            <polyline points="7 3 7 8 15 8"></polyline>
+                        </svg>
+                        <span data-i18n="common.save">保存</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <main class="main">
+            <div class="tabs-header" id="tabsHeader">
+                <button id="sidebarToggle" class="icon-btn" data-i18n-title="toolbar.toggleSidebarTitle"
+                    title="切换侧边栏状态">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 12h18M3 6h18M3 18h18"></path>
+                    </svg>
+                </button>
+                <div id="tabs" class="tabs-container">
+                    <!-- Tabs will be injected here -->
+                </div>
+                <button id="sftpToggleBtn" class="small-btn" data-i18n-title="toolbar.toggleSftpTitle"
+                    title="切换 SFTP 面板">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                    </svg>
+                    <span>SFTP</span>
+                </button>
+                <button id="fullscreenBtn" class="small-btn" data-i18n-title="toolbar.enterFullscreenTitle"
+                    title="进入全屏">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="15 3 21 3 21 9"></polyline>
+                        <polyline points="9 21 3 21 3 15"></polyline>
+                        <line x1="21" y1="3" x2="14" y2="10"></line>
+                        <line x1="3" y1="21" x2="10" y2="14"></line>
+                    </svg>
+                    <span data-i18n="toolbar.fullscreen">全屏</span>
+                </button>
+                <button id="newTabBtn" class="icon-btn" data-i18n-title="toolbar.newTabTitle" title="新建标签">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"></line>
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                    </svg>
+                </button>
+            </div>
+            <div class="workspace-shell">
+                <div id="terminalContainer" class="terminal-container">
+                    <!-- Terminal panes will be injected here -->
+                </div>
+                <div id="sftpPanel" class="sftp-panel">
+                    <div class="sftp-panel-head">
+                        <div class="sftp-title-row">
+                            <span class="sftp-title">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path
+                                        d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z">
+                                    </path>
+                                </svg>
+                                SFTP
+                            </span>
+                            <span id="sftpState" class="sftp-state sftp-state-idle" data-i18n="sftp.state.idle">未连接</span>
+                            <button id="sftpUpBtn" class="small-btn" type="button" data-i18n-title="sftp.upTitle"
+                                title="上级目录">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="15 18 9 12 15 6"></polyline>
+                                </svg>
+                                <span data-i18n="common.up">上级</span>
+                            </button>
+                            <input id="sftpPathInput" type="text" value="." autocomplete="off">
+                            <button id="sftpRefreshBtn" class="small-btn" type="button"
+                                data-i18n-title="sftp.refreshTitle" title="刷新">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                <span data-i18n="common.refresh">刷新</span>
+                            </button>
+                        </div>
+                        <div class="sftp-action-row">
+                            <button id="sftpMkdirBtn" class="small-btn" type="button">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path
+                                        d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z">
+                                    </path>
+                                    <line x1="12" y1="11" x2="12" y2="17"></line>
+                                    <line x1="9" y1="14" x2="15" y2="14"></line>
+                                </svg>
+                                <span data-i18n="sftp.newFolder">新建文件夹</span>
+                            </button>
+                            <button id="sftpUploadBtn" class="small-btn" type="button">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                    <polyline points="17 8 12 3 7 8"></polyline>
+                                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                                </svg>
+                                <span data-i18n="sftp.uploadFile">上传文件</span>
+                            </button>
+                            <button id="sftpUploadFolderBtn" class="small-btn" type="button">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path
+                                        d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z">
+                                    </path>
+                                    <polyline points="14 11 12 9 10 11"></polyline>
+                                    <line x1="12" y1="9" x2="12" y2="16"></line>
+                                </svg>
+                                <span data-i18n="sftp.uploadFolder">上传文件夹</span>
+                            </button>
+                            <button id="sftpCloseBtn" class="small-btn" type="button" data-i18n-title="sftp.closeTitle"
+                                title="关闭 SFTP">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="sftp-list-head">
+                        <span data-i18n="common.name">名称</span>
+                        <span data-i18n="common.modifiedAt">修改时间</span>
+                        <span data-i18n="common.permissionsSize">权限/大小</span>
+                        <span data-i18n="common.actions">操作</span>
+                    </div>
+                    <div id="sftpEntries" class="sftp-list-body">
+                        <div class="result-empty" data-i18n="empty.sftpAfterConnect">连接后可使用 SFTP</div>
+                    </div>
+                    <input id="sftpUploadFileInput" type="file" multiple hidden>
+                    <input id="sftpUploadFolderInput" type="file" webkitdirectory directory multiple hidden>
+                </div>
+            </div>
+
+            <div id="statusOverlay" class="status-overlay" data-i18n="status.pending">待连接</div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/vendor/xterm/xterm.js"></script>
+    <script src="/vendor/xterm-addon-fit/xterm-addon-fit.js"></script>
+    <script src="/i18n.js"></script>
+    <script src="/app.js"></script>
+</body>
+
+</html>

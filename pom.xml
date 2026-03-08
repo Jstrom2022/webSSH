@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Maven 项目配置文件 (POM)
+  本项目为基于 Spring Boot 与 WebSocket 的 Web SSH 终端应用
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+      父 POM：Spring Boot Starter Parent
+      继承 Spring Boot 的默认依赖管理、插件配置及资源过滤规则，
+      简化版本管理和构建配置
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.3</version>
+        <relativePath/>
+    </parent>
+
+    <!-- 项目坐标与基本信息 -->
+    <groupId>com.webssh</groupId>
+    <artifactId>webssh</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>webssh</name>
+    <description>Web SSH terminal based on Spring Boot and WebSocket</description>
+
+    <!-- 项目属性：指定 Java 编译与运行版本 -->
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+
+    <dependencies>
+        <!-- Spring Boot Web：提供 REST API、嵌入式 Tomcat、Spring MVC 等 Web 开发能力 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <!-- Spring Security：提供认证、授权、会话管理等安全功能，保护 Web SSH 接口 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <!-- Spring WebSocket：实现 WebSocket 双向通信，用于浏览器与后端实时传输 SSH 终端数据 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+        <!-- JSch (mwiede 维护版)：Java SSH 客户端库，用于建立 SSH 连接、执行命令、传输文件等 -->
+        <dependency>
+            <groupId>com.github.mwiede</groupId>
+            <artifactId>jsch</artifactId>
+            <version>0.2.19</version>
+        </dependency>
+        <!-- Spring Boot Test：测试依赖，包含 JUnit、Mockito、Spring Test 等，仅用于测试阶段 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <!-- 构建配置 -->
+    <build>
+        <plugins>
+            <!-- Spring Boot Maven 插件：支持打包可执行 jar、运行应用、构建镜像等 -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
