@@ -124,6 +124,48 @@ release/
 JAVA_OPTS="-Xms256m -Xmx1g" ./start.sh start
 ```
 
+### Docker 部署
+
+> 需要 Docker 20.10+ 以及 Docker Compose v2（`docker compose` 命令）。
+
+**一键启动**
+
+```bash
+# 克隆项目
+git clone https://github.com/Jstrom2022/webSSH.git && cd webSSH
+
+# 后台构建并启动（首次构建需要几分钟）
+docker compose up -d --build
+
+# 访问 http://localhost:8080
+```
+
+**环境变量配置（推荐）**
+
+在项目根目录创建 `.env` 文件，覆盖默认的敏感配置：
+
+```env
+WEBSSH_AUTH_USERNAME=admin
+WEBSSH_AUTH_PASSWORD=your-strong-password
+WEBSSH_CRYPTO_MASTER_KEY=your-random-secret-key
+```
+
+> ⚠️ 生产环境务必修改以上三项，`.env` 文件已在 `.gitignore` 中排除，不会提交到仓库。
+
+**数据持久化**
+
+会话数据挂载到宿主机的 `./data/` 目录，容器重建后数据不丢失。
+
+**常用命令**
+
+```bash
+docker compose up -d          # 后台启动
+docker compose down           # 停止并删除容器
+docker compose logs -f        # 实时查看日志
+docker compose restart        # 重启服务
+docker compose ps             # 查看运行状态
+```
+
 ## 兼容旧 SSH 服务器（ssh-rsa）
 
 如果连接时报错：

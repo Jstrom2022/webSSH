@@ -41,3 +41,6 @@ sessions/
 release/
 *.jar
 *.war
+
+# Docker
+.env

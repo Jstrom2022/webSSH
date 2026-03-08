@@ -1,0 +1,27 @@
+# 构建产物（Builder 阶段会重新构建）
+target/
+
+# 本地数据（不应打包进镜像）
+data/
+
+# 发布目录
+release/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.iml
+*.iws
+
+# Git
+.git/
+.gitignore
+
+# 文档（不影响运行）
+README*.md
+LICENSE
+COPYING
+
+# 临时文件
+*.log
+*.tmp

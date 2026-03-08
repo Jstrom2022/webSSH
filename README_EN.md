@@ -124,6 +124,48 @@ Override with the `JAVA_OPTS` environment variable:
 JAVA_OPTS="-Xms256m -Xmx1g" ./start.sh start
 ```
 
+### Docker Deployment
+
+> Requires Docker 20.10+ and Docker Compose v2 (the `docker compose` command).
+
+**One-command startup**
+
+```bash
+# Clone the repository
+git clone https://github.com/Jstrom2022/webSSH.git && cd webSSH
+
+# Build and start in the background (first build may take a few minutes)
+docker compose up -d --build
+
+# Open http://localhost:8080
+```
+
+**Environment variable configuration (recommended)**
+
+Create a `.env` file in the project root to override sensitive defaults:
+
+```env
+WEBSSH_AUTH_USERNAME=admin
+WEBSSH_AUTH_PASSWORD=your-strong-password
+WEBSSH_CRYPTO_MASTER_KEY=your-random-secret-key
+```
+
+> ⚠️ Always change the above three values in production. The `.env` file is excluded from Git via `.gitignore`.
+
+**Data persistence**
+
+Session data is bind-mounted to the host's `./data/` directory, so data survives container rebuilds.
+
+**Common commands**
+
+```bash
+docker compose up -d          # Start in background
+docker compose down           # Stop and remove containers
+docker compose logs -f        # Follow logs
+docker compose restart        # Restart service
+docker compose ps             # Check status
+```
+
 ## Legacy SSH Server Compatibility (ssh-rsa)
 
 If you encounter this error when connecting:

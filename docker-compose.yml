@@ -1,0 +1,42 @@
+services:
+  webssh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: webssh:latest
+    container_name: webssh
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    # --------------------------------------------------------
+    # 挂载数据目录，会话数据持久化到宿主机 ./data
+    # --------------------------------------------------------
+    volumes:
+      - ./data:/app/data
+
+    # --------------------------------------------------------
+    # 敏感配置通过环境变量覆盖（优先级高于 application.properties）
+    # 生产环境请修改这里的默认值，或改用 .env 文件管理
+    # --------------------------------------------------------
+    environment:
+      # 登录账户
+      - WEBSSH_AUTH_USERNAME=${WEBSSH_AUTH_USERNAME:-admin}
+      - WEBSSH_AUTH_PASSWORD=${WEBSSH_AUTH_PASSWORD:-admin123}
+      # 凭据加密主密钥（生产环境必须更换！）
+      - WEBSSH_CRYPTO_MASTER_KEY=${WEBSSH_CRYPTO_MASTER_KEY:-change-this-master-key-in-production}
+      # 服务端口（容器内部端口，与 ports 映射保持一致）
+      - SERVER_PORT=8080
+      # JVM 参数（可选，默认已内置于 Dockerfile ENTRYPOINT）
+      # - JAVA_OPTS=-Xms256m -Xmx1g -XX:+UseG1GC
+
+    # --------------------------------------------------------
+    # 健康检查
+    # --------------------------------------------------------
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/auth/me || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
