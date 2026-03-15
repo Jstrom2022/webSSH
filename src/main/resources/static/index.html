@@ -362,6 +362,10 @@
             <div class="workspace-shell">
                 <div id="terminalContainer" class="terminal-container">
                     <!-- Terminal panes will be injected here -->
+                    <div id="terminalContextMenu" class="terminal-context-menu" role="menu" aria-hidden="true">
+                        <button type="button" data-action="copy" role="menuitem" data-i18n="common.copy">复制</button>
+                        <button type="button" data-action="paste" role="menuitem" data-i18n="common.paste">粘贴</button>
+                    </div>
                 </div>
                 <div id="sftpPanel" class="sftp-panel">
                     <div class="sftp-panel-head">
@@ -463,7 +467,7 @@
                         <button class="key-btn key-toggle" type="button" data-mod="ALT" aria-pressed="false">ALT</button>
                         <button class="key-btn" type="button" data-key="DASH">-</button>
                         <button class="key-btn" type="button" data-key="UP" aria-label="上">&#8593;</button>
-                        <div class="key-spacer" aria-hidden="true"></div>
+                        <button class="key-btn" type="button" data-action="paste" data-i18n="common.paste">粘贴</button>
                     </div>
                     <div class="key-row row-2">
                         <button class="key-btn" type="button" data-key="INS">INS</button>

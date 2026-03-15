@@ -162,6 +162,10 @@ const sftpToggleBtn = document.getElementById("sftpToggleBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
 const mobileKeybar = document.getElementById("mobileKeybar");
 const mobileKeybarToggle = document.getElementById("mobileKeybarToggle");
+const terminalContextMenu = document.getElementById("terminalContextMenu");
+const terminalContextCopyBtn = terminalContextMenu
+    ? terminalContextMenu.querySelector("[data-action=\"copy\"]")
+    : null;
 
 // --- SFTP 面板元素 ---
 const sftpEls = {
@@ -345,6 +349,10 @@ function bindMobileKeybar() {
             setKeybarCollapsed(!document.body.classList.contains("keybar-collapsed"));
             return;
         }
+        if (action === "paste") {
+            handlePasteAction(activeTab());
+            return;
+        }
         const mod = btn.dataset.mod;
         if (mod) {
             toggleStickyMod(mod.toLowerCase());
@@ -382,6 +390,178 @@ function updateKeyboardOffset() {
         lastKeyboardOffset = offset;
         setTimeout(refreshTerminalAfterLayoutChange, 0);
     }
+}
+
+function normalizePasteText(text) {
+    if (!text) {
+        return "";
+    }
+    return text.replace(/\r?\n/g, "\r");
+}
+
+async function writeClipboardText(text) {
+    if (!text) {
+        return false;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+}
+
+async function readClipboardText() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+        return navigator.clipboard.readText();
+    }
+    return "";
+}
+
+async function handleCopyAction(tab = activeTab()) {
+    if (!tab || !tab.term || typeof tab.term.getSelection !== "function") {
+        return;
+    }
+    const text = tab.term.getSelection();
+    if (!text) {
+        return;
+    }
+    try {
+        const ok = await writeClipboardText(text);
+        if (!ok) {
+            throw new Error("clipboard");
+        }
+    } catch (e) {
+        setTabStatus(tab, t("status.clipboardUnavailable"), "error");
+    }
+}
+
+async function handlePasteAction(tab = activeTab()) {
+    if (!tab) {
+        return;
+    }
+    if (!tab.connected || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
+        setTabStatus(tab, t("status.pasteNeedConnect"), "error");
+        return;
+    }
+    let text = "";
+    let clipboardFailed = false;
+    try {
+        text = await readClipboardText();
+    } catch (e) {
+        clipboardFailed = true;
+    }
+    if (!text) {
+        const isMobile = window.innerWidth <= 900;
+        if (isMobile) {
+            const manual = window.prompt(t("prompt.pasteContent"), "");
+            if (manual === null) {
+                return;
+            }
+            text = manual;
+        }
+    }
+    if (!text) {
+        const msgKey = clipboardFailed ? "status.clipboardUnavailable" : "status.pasteEmpty";
+        setTabStatus(tab, t(msgKey), "error");
+        return;
+    }
+    const normalized = normalizePasteText(text);
+    sendTabInput(tab, normalized, false, false);
+    tab.term.focus();
+}
+
+function hideTerminalContextMenu() {
+    if (!terminalContextMenu) {
+        return;
+    }
+    terminalContextMenu.classList.remove("show");
+    terminalContextMenu.setAttribute("aria-hidden", "true");
+}
+
+function showTerminalContextMenu(clientX, clientY) {
+    if (!terminalContextMenu || !terminalContainer) {
+        return;
+    }
+    const tab = activeTab();
+    if (!tab) {
+        return;
+    }
+    const canCopy = tab.term && typeof tab.term.hasSelection === "function" && tab.term.hasSelection();
+    if (terminalContextCopyBtn) {
+        terminalContextCopyBtn.disabled = !canCopy;
+    }
+    terminalContextMenu.classList.add("show");
+    terminalContextMenu.setAttribute("aria-hidden", "false");
+
+    const containerRect = terminalContainer.getBoundingClientRect();
+    const menuRect = terminalContextMenu.getBoundingClientRect();
+    const margin = 6;
+    let left = clientX - containerRect.left;
+    let top = clientY - containerRect.top;
+    if (left + menuRect.width > containerRect.width - margin) {
+        left = containerRect.width - menuRect.width - margin;
+    }
+    if (top + menuRect.height > containerRect.height - margin) {
+        top = containerRect.height - menuRect.height - margin;
+    }
+    left = Math.max(margin, left);
+    top = Math.max(margin, top);
+    terminalContextMenu.style.left = `${Math.round(left)}px`;
+    terminalContextMenu.style.top = `${Math.round(top)}px`;
+}
+
+function bindTerminalContextMenu() {
+    if (!terminalContextMenu || !terminalContainer) {
+        return;
+    }
+    terminalContainer.addEventListener("contextmenu", (event) => {
+        if (!terminalContainer.contains(event.target)) {
+            return;
+        }
+        event.preventDefault();
+        showTerminalContextMenu(event.clientX, event.clientY);
+    });
+    terminalContextMenu.addEventListener("click", (event) => {
+        const btn = event.target.closest("button");
+        if (!btn || !terminalContextMenu.contains(btn)) {
+            return;
+        }
+        const action = btn.dataset.action;
+        if (action === "copy") {
+            handleCopyAction(activeTab());
+        } else if (action === "paste") {
+            handlePasteAction(activeTab());
+        }
+        hideTerminalContextMenu();
+    });
+    document.addEventListener("click", (event) => {
+        if (!terminalContextMenu.classList.contains("show")) {
+            return;
+        }
+        if (terminalContextMenu.contains(event.target)) {
+            return;
+        }
+        hideTerminalContextMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+            hideTerminalContextMenu();
+        }
+    });
+    window.addEventListener("resize", () => {
+        hideTerminalContextMenu();
+    });
 }
 
 /** 生成唯一标识符：优先使用 crypto.randomUUID()，不支持时回退到时间戳 */
@@ -2550,6 +2730,7 @@ async function bootstrap() {
     createAndSwitchTab();
     updateButtons();
     bindMobileKeybar();
+    bindTerminalContextMenu();
 
     try {
         await loadCurrentUser();

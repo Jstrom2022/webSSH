@@ -1224,6 +1224,51 @@ button:disabled {
     height: 100%;
 }
 
+.terminal-context-menu {
+    position: absolute;
+    top: 0;
+    left: 0;
+    display: none;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 120px;
+    padding: 6px;
+    background: hsla(222, 47%, 6%, 0.96);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    z-index: 200;
+}
+
+.terminal-context-menu.show {
+    display: flex;
+}
+
+.terminal-context-menu button {
+    appearance: none;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s ease, color 0.2s ease;
+}
+
+.terminal-context-menu button:hover {
+    background: rgba(var(--theme-accent-rgb), 0.16);
+    color: var(--text-primary);
+}
+
+.terminal-context-menu button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background: transparent;
+}
+
 .sftp-panel {
     height: 0;
     overflow: hidden;
@@ -1681,7 +1726,7 @@ button:disabled {
 
     .mobile-keybar .key-row {
         display: grid;
-        grid-template-columns: repeat(7, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr)) minmax(0, 1.6fr);
         gap: 6px;
     }
 
@@ -1702,6 +1747,7 @@ button:disabled {
         -webkit-user-select: none;
         touch-action: manipulation;
         position: relative;
+        white-space: nowrap;
     }
 
     .mobile-keybar .key-btn:active {
@@ -1730,6 +1776,12 @@ button:disabled {
         border-radius: 50%;
         background: rgba(var(--theme-accent-rgb), 0.95);
         box-shadow: 0 0 6px rgba(var(--theme-accent-rgb), 0.8);
+    }
+
+    .mobile-keybar .key-btn[data-action="paste"] {
+        font-size: 10px;
+        letter-spacing: 0;
+        padding: 0 4px;
     }
 
     .mobile-keybar .key-spacer {
