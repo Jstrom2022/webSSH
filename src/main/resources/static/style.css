@@ -59,6 +59,7 @@
 
     /* Layout */
     --sidebar-width: 300px;
+    --keyboard-offset: 0px;
 }
 
 * {
@@ -1488,6 +1489,11 @@ button:disabled {
     background: hsla(155, 100%, 45%, 0.08);
 }
 
+/* Mobile shortcut keybar (default hidden) */
+.mobile-keybar {
+    display: none;
+}
+
 /* Sidebar Backdrop */
 .sidebar-backdrop {
     display: none;
@@ -1503,6 +1509,18 @@ button:disabled {
 
 /* ===== 移动端响应式 ===== */
 @media (max-width: 900px) {
+    :root {
+        --mobile-keybar-base: 84px;
+        --mobile-keybar-height: calc(var(--mobile-keybar-base) + env(safe-area-inset-bottom));
+        --mobile-keybar-collapsed-height: calc(26px + env(safe-area-inset-bottom));
+        --mobile-keybar-effective-height: var(--mobile-keybar-height);
+        --keyboard-offset: 0px;
+    }
+
+    body.keybar-collapsed {
+        --mobile-keybar-effective-height: var(--mobile-keybar-collapsed-height);
+    }
+
     .sidebar-backdrop {
         display: block;
         pointer-events: none;
@@ -1615,6 +1633,132 @@ button:disabled {
 
     .terminal-pane .xterm {
         padding: 8px;
+    }
+
+    .terminal-pane {
+        inset: 0 0 calc(var(--mobile-keybar-effective-height) + var(--keyboard-offset)) 0;
+    }
+
+    .sftp-panel {
+        padding-bottom: calc(var(--mobile-keybar-effective-height) + var(--keyboard-offset));
+    }
+
+    .mobile-keybar {
+        display: flex;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: var(--keyboard-offset);
+        height: var(--mobile-keybar-height);
+        padding: 8px 44px calc(8px + env(safe-area-inset-bottom)) 10px;
+        gap: 6px;
+        flex-direction: column;
+        background: hsla(222, 47%, 6%, 0.9);
+        border-top: 1px solid var(--border-color);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        z-index: 1200;
+        transition: height 0.2s var(--transition);
+    }
+
+    body.keybar-collapsed .mobile-keybar {
+        height: var(--mobile-keybar-collapsed-height);
+        padding-top: 6px;
+        padding-bottom: calc(6px + env(safe-area-inset-bottom));
+    }
+
+    .mobile-keybar .key-rows {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding-right: 34px;
+        padding-top: 2px;
+    }
+
+    body.keybar-collapsed .mobile-keybar .key-rows {
+        display: none;
+    }
+
+    .mobile-keybar .key-row {
+        display: grid;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+        gap: 6px;
+    }
+
+    .mobile-keybar .key-btn {
+        height: 32px;
+        border-radius: 8px;
+        border: 1px solid var(--border-color);
+        background: hsla(222, 30%, 12%, 0.85);
+        color: var(--text-secondary);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: transform 0.15s ease, border-color 0.2s ease, background 0.2s ease;
+        user-select: none;
+        -webkit-user-select: none;
+        touch-action: manipulation;
+        position: relative;
+    }
+
+    .mobile-keybar .key-btn:active {
+        transform: translateY(1px);
+    }
+
+    .mobile-keybar .key-btn.is-active {
+        border-color: rgba(var(--theme-accent-rgb), 0.9);
+        background: linear-gradient(180deg, rgba(var(--theme-accent-rgb), 0.55), rgba(var(--theme-accent-rgb), 0.2));
+        color: #fff;
+        font-weight: 700;
+        text-shadow: 0 0 6px rgba(var(--theme-accent-rgb), 0.55);
+        box-shadow:
+            0 0 0 1px rgba(var(--theme-accent-rgb), 0.55) inset,
+            0 6px 16px rgba(var(--theme-accent-rgb), 0.35),
+            0 0 16px rgba(var(--theme-accent-rgb), 0.45);
+    }
+
+    .mobile-keybar .key-btn.is-active::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: rgba(var(--theme-accent-rgb), 0.95);
+        box-shadow: 0 0 6px rgba(var(--theme-accent-rgb), 0.8);
+    }
+
+    .mobile-keybar .key-spacer {
+        height: 32px;
+        border-radius: 8px;
+        border: 1px solid transparent;
+        pointer-events: none;
+    }
+
+    .mobile-keybar .keybar-toggle {
+        position: absolute;
+        top: 6px;
+        right: 10px;
+        width: 28px;
+        height: 22px;
+        border-radius: 999px;
+        border: 1px solid var(--border-color);
+        background: hsla(222, 30%, 12%, 0.85);
+        color: var(--text-secondary);
+        font-size: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: border-color 0.2s ease, background 0.2s ease;
+        z-index: 2;
+    }
+
+    .mobile-keybar .keybar-toggle:active {
+        transform: translateY(1px);
     }
 
     /* SFTP Responsive */
@@ -1748,7 +1892,7 @@ button:disabled {
 
     /* 手机端状态覆盖层 */
     .status-overlay {
-        bottom: 12px;
+        bottom: calc(12px + var(--mobile-keybar-effective-height) + var(--keyboard-offset));
         right: 12px;
         left: 12px;
         text-align: center;

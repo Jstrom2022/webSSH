@@ -160,6 +160,8 @@ const saveSessionBtn = document.getElementById("saveSessionBtn");
 const newTabBtn = document.getElementById("newTabBtn");
 const sftpToggleBtn = document.getElementById("sftpToggleBtn");
 const fullscreenBtn = document.getElementById("fullscreenBtn");
+const mobileKeybar = document.getElementById("mobileKeybar");
+const mobileKeybarToggle = document.getElementById("mobileKeybarToggle");
 
 // --- SFTP 面板元素 ---
 const sftpEls = {
@@ -211,6 +213,10 @@ let sessionsCache = [];
 let sessionsLoaded = false;
 /** SFTP 面板是否处于打开状态 */
 let sftpPanelOpen = false;
+/** 移动端快捷键栏的修饰键锁定状态 */
+const stickyMods = { ctrl: false, alt: false, shift: false };
+/** 记录键盘偏移，避免重复刷新 */
+let lastKeyboardOffset = 0;
 
 // ==================== 工具函数 ====================
 
@@ -220,6 +226,162 @@ function localizeText(text) {
         return t(text.key, text.params || {});
     }
     return translateKnownMessage(text);
+}
+
+// ==================== 移动端快捷键栏 ====================
+
+const KEYBAR_KEY_MAP = {
+    ESC: { data: "\x1b", applyMods: false },
+    TAB: { data: "\t", applyMods: false },
+    INS: { data: "\x1b[2~", applyMods: false },
+    END: { data: "\x1b[F", applyMods: false },
+    UP: { data: "\x1b[A", applyMods: false },
+    DOWN: { data: "\x1b[B", applyMods: false },
+    LEFT: { data: "\x1b[D", applyMods: false },
+    RIGHT: { data: "\x1b[C", applyMods: false },
+    DASH: { data: "-", applyMods: true },
+    COLON: { data: ":", applyMods: true }
+};
+
+function toCtrlChar(ch) {
+    const upper = ch.toUpperCase();
+    const code = upper.charCodeAt(0);
+    if (code >= 64 && code <= 95) {
+        return String.fromCharCode(code - 64);
+    }
+    if (upper === "?") {
+        return String.fromCharCode(127);
+    }
+    return null;
+}
+
+function applyStickyModifiers(data) {
+    if (!stickyMods.ctrl && !stickyMods.alt && !stickyMods.shift) {
+        return data;
+    }
+    if (data.length !== 1) {
+        return data;
+    }
+    const code = data.charCodeAt(0);
+    if (code > 127) {
+        return data;
+    }
+    if (code < 32 || code === 127) {
+        return data;
+    }
+
+    let ch = data;
+    if (stickyMods.shift && ch >= "a" && ch <= "z") {
+        ch = ch.toUpperCase();
+    }
+    if (stickyMods.ctrl) {
+        const ctrlChar = toCtrlChar(ch);
+        if (ctrlChar) {
+            ch = ctrlChar;
+        }
+    }
+    if (stickyMods.alt) {
+        ch = `\x1b${ch}`;
+    }
+    return ch;
+}
+
+function sendTabInput(tab, data, applyMods = true, showStatusOnFail = false) {
+    if (!tab || !tab.connected || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
+        if (showStatusOnFail) {
+            setTabStatus(tab, "请先连接 SSH 再使用快捷键", "error");
+        }
+        return false;
+    }
+    const payload = applyMods ? applyStickyModifiers(data) : data;
+    tab.socket.send(JSON.stringify({ type: "input", data: payload }));
+    return true;
+}
+
+function syncStickyModButtons() {
+    if (!mobileKeybar) {
+        return;
+    }
+    mobileKeybar.querySelectorAll("[data-mod]").forEach((btn) => {
+        const mod = (btn.dataset.mod || "").toLowerCase();
+        const active = !!stickyMods[mod];
+        btn.classList.toggle("is-active", active);
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+}
+
+function toggleStickyMod(mod) {
+    if (!(mod in stickyMods)) {
+        return;
+    }
+    stickyMods[mod] = !stickyMods[mod];
+    syncStickyModButtons();
+}
+
+function setKeybarCollapsed(collapsed) {
+    document.body.classList.toggle("keybar-collapsed", collapsed);
+    if (mobileKeybar) {
+        mobileKeybar.classList.toggle("collapsed", collapsed);
+    }
+    if (mobileKeybarToggle) {
+        mobileKeybarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        mobileKeybarToggle.title = collapsed ? "展开快捷键栏" : "收起快捷键栏";
+        mobileKeybarToggle.innerHTML = collapsed ? "&#9650;" : "&#9660;";
+    }
+    setTimeout(refreshTerminalAfterLayoutChange, 220);
+}
+
+function bindMobileKeybar() {
+    if (!mobileKeybar) {
+        return;
+    }
+    mobileKeybar.addEventListener("click", (event) => {
+        const btn = event.target.closest("button");
+        if (!btn || !mobileKeybar.contains(btn)) {
+            return;
+        }
+        const action = btn.dataset.action;
+        if (action === "toggleKeybar") {
+            setKeybarCollapsed(!document.body.classList.contains("keybar-collapsed"));
+            return;
+        }
+        const mod = btn.dataset.mod;
+        if (mod) {
+            toggleStickyMod(mod.toLowerCase());
+            return;
+        }
+        const key = btn.dataset.key;
+        if (!key || !KEYBAR_KEY_MAP[key]) {
+            return;
+        }
+        const tab = activeTab();
+        const { data, applyMods } = KEYBAR_KEY_MAP[key];
+        const sent = sendTabInput(tab, data, applyMods, true);
+        if (sent && tab) {
+            tab.term.focus();
+        }
+    });
+    syncStickyModButtons();
+}
+
+function updateKeyboardOffset() {
+    const root = document.documentElement;
+    if (window.innerWidth > 900) {
+        root.style.setProperty("--keyboard-offset", "0px");
+        return;
+    }
+    const viewport = window.visualViewport;
+    if (!viewport) {
+        root.style.setProperty("--keyboard-offset", "0px");
+        return;
+    }
+    const rawOffset = window.innerHeight - viewport.height - viewport.offsetTop;
+    const offset = Math.max(0, Math.round(rawOffset));
+    root.style.setProperty("--keyboard-offset", `${offset}px`);
+    if (offset !== lastKeyboardOffset) {
+        lastKeyboardOffset = offset;
+        setTimeout(refreshTerminalAfterLayoutChange, 0);
+    }
 }
 
 /** 生成唯一标识符：优先使用 crypto.randomUUID()，不支持时回退到时间戳 */
@@ -299,16 +461,16 @@ function makeTab(profile = {}) {
     };
 
     term.onData((data) => {
-        if (!tab.connected || !tab.socket || tab.socket.readyState !== WebSocket.OPEN) {
-            return;
-        }
-        tab.socket.send(JSON.stringify({ type: "input", data }));
+        sendTabInput(tab, data, true, false);
     });
     term.onKey(({ domEvent }) => {
         if (domEvent.key !== "Enter" || domEvent.repeat || domEvent.isComposing) {
             return;
         }
         if (domEvent.altKey || domEvent.ctrlKey || domEvent.metaKey || domEvent.shiftKey) {
+            return;
+        }
+        if (stickyMods.ctrl || stickyMods.alt || stickyMods.shift) {
             return;
         }
         if (activeTabId !== tab.id || tab.connected || !tab.allowEnterReconnect) {
@@ -2320,6 +2482,7 @@ async function bootstrap() {
     closeDrawerBtn.addEventListener("click", () => toggleDrawer(false));
 
     window.addEventListener("resize", () => {
+        updateKeyboardOffset();
         const tab = activeTab();
         if (!tab) {
             return;
@@ -2362,6 +2525,11 @@ async function bootstrap() {
     if (window.innerWidth <= 900) {
         if (sidebar) sidebar.classList.add("collapsed");
     }
+    updateKeyboardOffset();
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", updateKeyboardOffset);
+        window.visualViewport.addEventListener("scroll", updateKeyboardOffset);
+    }
 
     const savedThemeId = getSavedThemeId();
     applyThemeCssVars(TERMINAL_THEMES[savedThemeId]);
@@ -2381,6 +2549,7 @@ async function bootstrap() {
     setSftpPanelVisible(false);
     createAndSwitchTab();
     updateButtons();
+    bindMobileKeybar();
 
     try {
         await loadCurrentUser();

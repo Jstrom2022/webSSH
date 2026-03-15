@@ -451,6 +451,32 @@
                 </div>
             </div>
 
+            <!-- Mobile shortcut keybar -->
+            <div id="mobileKeybar" class="mobile-keybar" aria-label="快捷键栏">
+                <button id="mobileKeybarToggle" class="keybar-toggle" type="button" data-action="toggleKeybar"
+                    aria-expanded="true" title="收起快捷键栏">&#9660;</button>
+                <div class="key-rows">
+                    <div class="key-row">
+                        <button class="key-btn" type="button" data-key="ESC">ESC</button>
+                        <button class="key-btn" type="button" data-key="TAB">TAB</button>
+                        <button class="key-btn key-toggle" type="button" data-mod="CTRL" aria-pressed="false">CTRL</button>
+                        <button class="key-btn key-toggle" type="button" data-mod="ALT" aria-pressed="false">ALT</button>
+                        <button class="key-btn" type="button" data-key="DASH">-</button>
+                        <button class="key-btn" type="button" data-key="UP" aria-label="上">&#8593;</button>
+                        <div class="key-spacer" aria-hidden="true"></div>
+                    </div>
+                    <div class="key-row row-2">
+                        <button class="key-btn" type="button" data-key="INS">INS</button>
+                        <button class="key-btn" type="button" data-key="END">END</button>
+                        <button class="key-btn key-toggle" type="button" data-mod="SHIFT" aria-pressed="false">SHIFT</button>
+                        <button class="key-btn" type="button" data-key="COLON">:</button>
+                        <button class="key-btn" type="button" data-key="LEFT" aria-label="左">&#8592;</button>
+                        <button class="key-btn" type="button" data-key="DOWN" aria-label="下">&#8595;</button>
+                        <button class="key-btn" type="button" data-key="RIGHT" aria-label="右">&#8594;</button>
+                    </div>
+                </div>
+            </div>
+
             <div id="statusOverlay" class="status-overlay" data-i18n="status.pending">待连接</div>
         </main>
     </div>
