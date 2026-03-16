@@ -287,6 +287,33 @@ webssh.ssh.allow-legacy-ssh-rsa=true
 - `telegram`
 - `qq-official`
 
+## 如何申请机器人
+
+### 1. Telegram 机器人
+
+1. 在 Telegram 中搜索 `@BotFather`。
+2. 发送 `/newbot` 命令，按照提示设置机器人的显示名称（Name）和唯一用户名（Username，必须以 `bot` 结尾）。
+3. 申请成功后，`BotFather` 会返回一个 **API Token**。
+4. 将此 Token 填写到 WebSSH 管理面板的 Telegram 配置项中。
+
+### 2. QQ 官方机器人
+
+1. 登录 [QQ 开放平台](https://q.qq.com/qqbot/openclaw/index.html)。
+2. 申请openClaws机器人。
+
+![QQ Bot Registration](./img/0dc7cd58-8264-4ab4-a106-323aaf9f5dfa.png)
+
+3. 进入机器人管理页面，在「开发设置」中获取 **AppID** 和 **AppSecret** (ClientSecret)。
+4. 在 WebSSH 管理面板中填写上述信息。
+5. **获取用户 ID**：
+    - 在管理面板开启机器人后，在 Telegram 或 QQ 中与机器人私聊。
+    - 机器人连接成功后，在 WebSSH 后端日志中（控制台或 `nohup.out`）可以看到你的 UserID（通常是一串加密字符）。
+    - 将你的 UserID 加入到「允许的用户 ID」白名单中，以确保安全。
+6. **注意**：
+    - 采用直连方式（AppID + AppSecret + Gateway WebSocket），**无需配置回调地址**。
+    - 建议在「开发设置」中将「私信」功能开启。
+    - 确保机器人已上线或处于开发模式。
+
 ## SFTP 说明
 
 - 上传采用分片模式，前端分片后逐块发送，无固定大小上限

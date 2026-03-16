@@ -18,6 +18,7 @@ A browser-based SSH client built with Java Spring Boot + WebSocket. Features mul
 - **Internationalization** — 7 languages (简体中文, English, 日本語, 한국어, Deutsch, Français, Русский)
 - **Fullscreen Mode** — Toggle fullscreen terminal display
 - **Mobile Adaptability** — Responsive Web Design with optimized layouts, sidebar touch control, and file management interactions for mobile browsers
+- **Chatbot Integration** — Supports Telegram Bot and QQ Private Bot for managing SSH and AI programming tasks via messages
 
 ## Tech Stack
 
@@ -244,6 +245,74 @@ Endpoint: `/ws/ssh`
 | `GET` | `/api/sessions/{id}` | Get session details (with decrypted credentials) |
 | `POST` | `/api/sessions` | Create or update a session |
 | `DELETE` | `/api/sessions/{id}` | Delete a session |
+
+## Robot Capabilities
+
+### Supported Bot Types
+
+- **Telegram Bot**: Uses Long Polling; no public callback URL required.
+- **QQ Private Bot**: Directly connects to the official OpenAPI + Gateway in the same way as the OpenClaw plugin. Currently supports private chat triggers.
+
+### Bot Commands
+
+Both bots share the same core command set:
+
+- SSH: `/list`, `/connect`, `/disconnect`, `/status`
+- AI: `/codex`, `/codex_stop`, `/codex_status`, `/codex_clear`
+- AI: `/claude`, `/claude_stop`, `/claude_status`, `/claude_clear`
+
+Once connected to SSH, you can send plain text to execute it as a Shell command.
+
+### QQ Private Bot Notes
+
+- Enter `App ID` and `App Secret` in the management panel.
+- Currently, only **private chats** with the bot are supported, not group chats.
+- Uses the direct connection method (compatible with OpenClaw `qqbot` plugin): `AppID + AppSecret + Gateway WebSocket`.
+- **No callback URL configuration needed**.
+- A whitelist for "Allowed User IDs" can be configured; leave blank for no additional restrictions.
+- Due to QQ bot's rate-limiting on replies, SSH and AI terminal outputs use **aggregated replies**, unlike Telegram's continuous streaming.
+
+### Bot Configuration API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/bot-settings` | Get all bot providers and configurations |
+| `GET` | `/api/bot-settings/{type}` | Get configuration for a specific bot |
+| `POST` | `/api/bot-settings/{type}` | Save and apply configuration |
+| `GET` | `/api/bot-settings/{type}/status` | Get bot running status |
+| `POST` | `/api/bot-settings/{type}/restart` | Restart a specific bot |
+
+Currently built-in types:
+
+- `telegram`
+- `qq-official`
+
+## How to Apply for Bots
+
+### 1. Telegram Bot
+
+1. Search for `@BotFather` in Telegram.
+2. Send the `/newbot` command and follow the prompts to set the bot's display Name and a unique Username (must end in `bot`).
+3. Once created, `BotFather` will provide an **API Token**.
+4. Enter this Token into the Telegram configuration section in the WebSSH management panel.
+
+### 2. QQ Official Bot
+
+1. Log in to the [QQ Open Platform](https://q.qq.com/qqbot/openclaw/index.html).
+2. Apply for an openClaws bot.
+
+![QQ Bot Registration](./img/0dc7cd58-8264-4ab4-a106-323aaf9f5dfa.png)
+
+3. Navigate to the bot management page and obtain the **AppID** and **AppSecret** (ClientSecret) under "Development Settings".
+4. Enter these credentials into the WebSSH management panel.
+5. **How to get User ID**:
+    - Start a private chat with your bot after enabling it in the management panel.
+    - Once the bot connects successfully, your UserID (usually an encrypted string) will appear in the WebSSH backend logs (console or `nohup.out`).
+    - Add your UserID to the "Allowed User IDs" whitelist for security.
+6. **Notes**:
+    - Uses direct connection (AppID + AppSecret + Gateway WebSocket); **no callback URL is required**.
+    - Ensure "Direct Message" (私信) is enabled in the development settings.
+    - Make sure the bot is "Online" or in "Development mode".
 
 ## SFTP Notes
 
