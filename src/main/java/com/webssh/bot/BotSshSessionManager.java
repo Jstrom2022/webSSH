@@ -111,6 +111,42 @@ public class BotSshSessionManager {
         }
     }
 
+    /** 远端 exec 通道句柄，用于 AI CLI 等长任务。 */
+    public static final class RemoteCommandHandle {
+        private final ChannelExec channel;
+        private final InputStream output;
+
+        private RemoteCommandHandle(ChannelExec channel, InputStream output) {
+            this.channel = channel;
+            this.output = output;
+        }
+
+        public InputStream output() {
+            return output;
+        }
+
+        public boolean isRunning() {
+            return channel != null && channel.isConnected() && !channel.isClosed();
+        }
+
+        public int waitForExit() throws InterruptedException {
+            while (isRunning()) {
+                Thread.sleep(100);
+            }
+            return channel == null ? -1 : channel.getExitStatus();
+        }
+
+        public void stop() {
+            if (channel == null) {
+                return;
+            }
+            try {
+                channel.disconnect();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
     /** SSH 连接状态封装 */
     public static class SshConnection {
         private final Session session;
@@ -180,6 +216,24 @@ public class BotSshSessionManager {
                 activeExecOutput = execOutput;
             } catch (Exception e) {
                 closeActiveExec();
+                throw new IOException(e.getMessage(), e);
+            }
+        }
+
+        /** 为长任务创建独立 exec 通道，调用方负责读取输出与生命周期管理。 */
+        public synchronized RemoteCommandHandle startRemoteCommand(String command) throws IOException {
+            if (!isConnected()) {
+                throw new IOException("SSH 连接已断开");
+            }
+            try {
+                ChannelExec execChannel = (ChannelExec) session.openChannel("exec");
+                execChannel.setPty(true);
+                execChannel.setPtyType("xterm-256color");
+                execChannel.setCommand(BotSshSessionManager.buildExecCommand(command, getCwd()));
+                InputStream execOutput = execChannel.getInputStream();
+                execChannel.connect(5_000);
+                return new RemoteCommandHandle(execChannel, execOutput);
+            } catch (Exception e) {
                 throw new IOException(e.getMessage(), e);
             }
         }
@@ -414,6 +468,27 @@ public class BotSshSessionManager {
             }
         });
         return future;
+    }
+
+    /** 启动远端长任务命令（例如 Codex/Claude CLI）。 */
+    public RemoteCommandHandle startRemoteCommand(String botType, String userId, String command) throws IOException {
+        String key = connectionKey(botType, userId);
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            SshConnection conn = ensureConnection(botType, userId);
+            if (conn == null) {
+                throw new IOException("未连接 SSH。请先使用 /connect 连接。");
+            }
+            try {
+                return conn.startRemoteCommand(command);
+            } catch (IOException e) {
+                lastError = e;
+                log.warn("启动远端命令失败，准备重试 [{}][attempt={}]: {}", key, attempt, e.getMessage());
+                invalidateConnection(key, conn);
+            }
+        }
+        throw new IOException("启动远端命令失败: " + (lastError == null ? "未知错误" : lastError.getMessage()),
+                lastError);
     }
 
     /** 建立 SSH 会话，并用一次轻量 exec 初始化当前目录。 */

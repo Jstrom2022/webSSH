@@ -37,15 +37,17 @@ public class AiCliExecutor {
      * 支持的 AI CLI 工具类型。
      */
     public enum CliType {
-        CODEX("Codex", "/opt/homebrew/bin/codex"),
-        CLAUDE("Claude Code", "/usr/local/bin/claude");
+        CODEX("Codex", "/opt/homebrew/bin/codex", "codex"),
+        CLAUDE("Claude Code", "/usr/local/bin/claude", "claude");
 
         private final String displayName;
         private final String defaultBin;
+        private final String commandName;
 
-        CliType(String displayName, String defaultBin) {
+        CliType(String displayName, String defaultBin, String commandName) {
             this.displayName = displayName;
             this.defaultBin = defaultBin;
+            this.commandName = commandName;
         }
 
         public String getDisplayName() {
@@ -55,13 +57,24 @@ public class AiCliExecutor {
         public String getDefaultBin() {
             return defaultBin;
         }
+
+        public String getCommandName() {
+            return commandName;
+        }
     }
 
     /** 正在运行的进程，key = cliType:botType:userId */
     private final ConcurrentMap<String, Process> runningProcesses = new ConcurrentHashMap<>();
+    /** 正在运行的远端任务，key = cliType:botType:userId */
+    private final ConcurrentMap<String, BotSshSessionManager.RemoteCommandHandle> runningRemoteCommands = new ConcurrentHashMap<>();
 
     /** 用户的会话 ID，key = cliType:botType:userId */
     private final ConcurrentMap<String, String> userSessionIds = new ConcurrentHashMap<>();
+
+    @FunctionalInterface
+    public interface RemoteCommandStarter {
+        BotSshSessionManager.RemoteCommandHandle start(String command) throws Exception;
+    }
 
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ai-cli-exec");
@@ -72,6 +85,7 @@ public class AiCliExecutor {
     @PreDestroy
     public void shutdown() {
         runningProcesses.values().forEach(Process::destroyForcibly);
+        runningRemoteCommands.values().forEach(BotSshSessionManager.RemoteCommandHandle::stop);
         executor.shutdownNow();
     }
 
@@ -150,6 +164,60 @@ public class AiCliExecutor {
         });
     }
 
+    /**
+     * 通过已建立的 SSH 会话执行 AI CLI 任务。
+     */
+    public void executeRemote(CliType cliType, String userKey, String prompt, String workDir,
+            RemoteCommandStarter remoteStarter,
+            Consumer<String> outputCallback, Runnable onComplete) {
+        String processKey = processKey(cliType, userKey);
+        stop(cliType, userKey);
+
+        executor.submit(() -> {
+            BotSshSessionManager.RemoteCommandHandle handle = null;
+            try {
+                String remoteCommand = buildRemoteCommand(cliType, prompt, workDir, processKey);
+                handle = remoteStarter.start(remoteCommand);
+                runningRemoteCommands.put(processKey, handle);
+
+                log.info("{} 远端任务已启动 [{}]: {}", cliType.getDisplayName(), userKey, prompt);
+                outputCallback.accept("⏳ " + cliType.getDisplayName() + " 任务已启动...");
+
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(handle.output(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (processLine(cliType, userKey, line, outputCallback)) {
+                            continue;
+                        }
+                        String visible = sanitizeRemoteRawLine(line);
+                        if (!visible.isBlank()) {
+                            outputCallback.accept("🖥️ " + visible);
+                        }
+                    }
+                }
+
+                int exitCode = handle.waitForExit();
+                log.info("{} 远端任务完成 [{}], exit={}", cliType.getDisplayName(), userKey, exitCode);
+                outputCallback.accept("✅ " + cliType.getDisplayName() + " 任务已完成 (exit=" + exitCode + ")");
+            } catch (Exception e) {
+                BotSshSessionManager.RemoteCommandHandle active = handle;
+                if (active != null && !active.isRunning()) {
+                    outputCallback.accept("🛑 " + cliType.getDisplayName() + " 任务已停止。");
+                } else {
+                    log.error("{} 远端执行异常 [{}]: {}", cliType.getDisplayName(), userKey, e.getMessage(), e);
+                    outputCallback.accept("❌ " + cliType.getDisplayName() + " 执行失败: " + e.getMessage());
+                }
+            } finally {
+                runningRemoteCommands.remove(processKey);
+                if (handle != null && handle.isRunning()) {
+                    handle.stop();
+                }
+                onComplete.run();
+            }
+        });
+    }
+
     /** 清除指定用户的 AI 会话上下文 */
     public void clearSession(CliType cliType, String userKey) {
         String key = processKey(cliType, userKey);
@@ -173,6 +241,12 @@ public class AiCliExecutor {
             log.info("{} 任务已强制终止 [{}]", cliType.getDisplayName(), userKey);
             return true;
         }
+        BotSshSessionManager.RemoteCommandHandle remote = runningRemoteCommands.remove(processKey);
+        if (remote != null && remote.isRunning()) {
+            remote.stop();
+            log.info("{} 远端任务已停止 [{}]", cliType.getDisplayName(), userKey);
+            return true;
+        }
         return false;
     }
 
@@ -188,13 +262,34 @@ public class AiCliExecutor {
                 runningProcesses.remove(key, process);
             }
         });
+        runningRemoteCommands.forEach((key, handle) -> {
+            if (belongsToBotType(key, botType) && handle != null && handle.isRunning()) {
+                handle.stop();
+                runningRemoteCommands.remove(key, handle);
+            }
+        });
         userSessionIds.keySet().removeIf(key -> belongsToBotType(key, botType));
+    }
+
+    /** 停止指定用户的所有 AI 任务（本机与远端）。 */
+    public void stopAllForUser(String userKey) {
+        if (userKey == null || userKey.isBlank()) {
+            return;
+        }
+        for (CliType type : CliType.values()) {
+            stop(type, userKey);
+        }
     }
 
     /** 检查是否有任务在运行 */
     public boolean isRunning(CliType cliType, String userKey) {
-        Process process = runningProcesses.get(processKey(cliType, userKey));
-        return process != null && process.isAlive();
+        String key = processKey(cliType, userKey);
+        Process process = runningProcesses.get(key);
+        if (process != null && process.isAlive()) {
+            return true;
+        }
+        BotSshSessionManager.RemoteCommandHandle remote = runningRemoteCommands.get(key);
+        return remote != null && remote.isRunning();
     }
 
     /** 检查是否有任何 AI CLI 任务在运行 */
@@ -223,6 +318,68 @@ public class AiCliExecutor {
             case CODEX -> buildCodexCommand(prompt, workDir, sessionId);
             case CLAUDE -> buildClaudeCommand(prompt, workDir, sessionId);
         };
+    }
+
+    private String buildRemoteCommand(CliType cliType, String prompt, String workDir, String processKey) {
+        List<String> args = new ArrayList<>(buildCommand(cliType, prompt, workDir, processKey));
+        if (!args.isEmpty()) {
+            args.remove(0);
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append(buildRemoteBinResolveScript(cliType, cliType.getCommandName()));
+        sb.append("\"$__webssh_ai_bin\"");
+        for (String arg : args) {
+            sb.append(' ').append(shellQuote(arg));
+        }
+        return sb.toString();
+    }
+
+    private String buildRemoteBinResolveScript(CliType cliType, String commandName) {
+        String[] candidates = switch (cliType) {
+            case CODEX -> new String[] {
+                    "/opt/homebrew/bin/codex",
+                    "/usr/local/bin/codex",
+                    "/usr/bin/codex"
+            };
+            case CLAUDE -> new String[] {
+                    "/usr/local/bin/claude",
+                    "/opt/homebrew/bin/claude",
+                    "/usr/bin/claude"
+            };
+        };
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("export PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.cargo/bin\"; ");
+        sb.append("__webssh_ai_bin=\"$(command -v ").append(commandName).append(" 2>/dev/null || true)\"; ");
+        sb.append("if [ -z \"$__webssh_ai_bin\" ]; then ");
+        sb.append("for __webssh_candidate in");
+        for (String candidate : candidates) {
+            sb.append(' ').append(shellQuote(candidate));
+        }
+        sb.append("; do ");
+        sb.append("if [ -x \"$__webssh_candidate\" ]; then __webssh_ai_bin=\"$__webssh_candidate\"; break; fi; ");
+        sb.append("done; ");
+        sb.append("fi; ");
+        sb.append("if [ -z \"$__webssh_ai_bin\" ]; then ");
+        sb.append("for __webssh_candidate in ");
+        sb.append("\"$HOME/.local/bin/").append(commandName).append("\" ");
+        sb.append("\"$HOME/.npm-global/bin/").append(commandName).append("\" ");
+        sb.append("\"$HOME/.cargo/bin/").append(commandName).append("\"; do ");
+        sb.append("if [ -x \"$__webssh_candidate\" ]; then __webssh_ai_bin=\"$__webssh_candidate\"; break; fi; ");
+        sb.append("done; ");
+        sb.append("fi; ");
+        sb.append("if [ -z \"$__webssh_ai_bin\" ]; then ");
+        sb.append("for __webssh_candidate in \"$HOME/.nvm/versions/node\"/*/bin/").append(commandName).append("; do ");
+        sb.append("if [ -x \"$__webssh_candidate\" ]; then __webssh_ai_bin=\"$__webssh_candidate\"; break; fi; ");
+        sb.append("done; ");
+        sb.append("fi; ");
+        sb.append("if [ -z \"$__webssh_ai_bin\" ]; then ");
+        sb.append("echo ")
+                .append(shellQuote("❌ 未找到 " + cliType.getDisplayName()
+                        + " CLI（命令: " + commandName + "）。请在 SSH 主机安装并确保 PATH 可见。"));
+        sb.append("; exit 127; ");
+        sb.append("fi; ");
+        return sb.toString();
     }
 
     private List<String> buildCodexCommand(String prompt, String workDir, String sessionId) {
@@ -266,22 +423,44 @@ public class AiCliExecutor {
         return cmd;
     }
 
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    private String sanitizeRemoteRawLine(String line) {
+        if (line == null) {
+            return "";
+        }
+        String text = line
+                .replace("\u0002", "")
+                .replace("\u0003", "")
+                .trim();
+        int marker = text.indexOf("__WEBSSH_CWD__:");
+        if (marker >= 0) {
+            text = text.substring(0, marker).trim();
+        }
+        return text;
+    }
+
     // ==================== 输出解析 ====================
 
-    private void processLine(CliType cliType, String userKey, String line, Consumer<String> callback) {
-        if (line.isBlank())
-            return;
+    private boolean processLine(CliType cliType, String userKey, String line, Consumer<String> callback) {
+        if (line == null || line.isBlank()) {
+            return false;
+        }
+        String normalized = line.trim();
 
         // 非 JSON 行
-        if (!line.startsWith("{")) {
-            return;
+        if (!normalized.startsWith("{")) {
+            return false;
         }
 
         String processKey = processKey(cliType, userKey);
         switch (cliType) {
-            case CODEX -> processCodexEvent(processKey, line, callback);
-            case CLAUDE -> processClaudeEvent(processKey, line, callback);
+            case CODEX -> processCodexEvent(processKey, normalized, callback);
+            case CLAUDE -> processClaudeEvent(processKey, normalized, callback);
         }
+        return true;
     }
 
     /**

@@ -156,6 +156,11 @@
                             <input id="telegramBotUsername" type="text" placeholder="如 my_webssh_bot（不含 @）" autocomplete="off">
                         </div>
                         <div class="form-group">
+                            <label>关联 WebSSH 用户</label>
+                            <input id="telegramSshUsername" type="text" placeholder="admin" value="admin" autocomplete="off">
+                            <div class="form-hint">机器人将读取此用户的 SSH 会话列表</div>
+                        </div>
+                        <div class="form-group">
                             <label>允许的用户 ID</label>
                             <textarea id="telegramAllowedUsers" rows="3" placeholder="每行一个 Telegram 用户 ID&#10;留空则所有人可用"></textarea>
                             <div class="form-hint">发送 /start 给 Bot 可获取你的用户 ID</div>
@@ -222,6 +227,11 @@
                         <div class="form-group">
                             <label>App Secret</label>
                             <input id="qqOfficialAppSecret" type="password" placeholder="QQ 机器人 App Secret" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>关联 WebSSH 用户</label>
+                            <input id="qqOfficialSshUsername" type="text" placeholder="admin" value="admin" autocomplete="off">
+                            <div class="form-hint">机器人将读取此用户的 SSH 会话列表</div>
                         </div>
                         <div class="form-group">
                             <div class="form-hint">按 OpenClaw 同款方式直连 QQ Gateway，无需配置回调地址。</div>

@@ -2798,6 +2798,8 @@ const BOT_UI_CONFIGS = {
 
             if (tokenEl) tokenEl.value = config.token || "";
             if (usernameEl) usernameEl.value = config.botUsername || "";
+            const sshUsernameEl = document.getElementById("telegramSshUsername");
+            if (sshUsernameEl) sshUsernameEl.value = settings.sshUsername || "admin";
             if (allowedEl) allowedEl.value = (settings.allowedUserIds || []).join("\n");
             if (enabledEl) enabledEl.checked = settings.enabled || false;
         },
@@ -2811,10 +2813,12 @@ const BOT_UI_CONFIGS = {
                 throw new Error("启用 Telegram Bot 之前请填写 Token 和 Username");
             }
 
+            const sshUsername = (document.getElementById("telegramSshUsername")?.value || "admin").trim();
+
             return {
                 type: "telegram",
                 enabled: enabled,
-                sshUsername: "admin",
+                sshUsername: sshUsername,
                 config: {
                     token: token,
                     botUsername: botUsername
@@ -2839,6 +2843,8 @@ const BOT_UI_CONFIGS = {
 
             if (appIdEl) appIdEl.value = config.appId || "";
             if (secretEl) secretEl.value = config.appSecret || "";
+            const sshUsernameEl = document.getElementById("qqOfficialSshUsername");
+            if (sshUsernameEl) sshUsernameEl.value = settings.sshUsername || "admin";
             if (usersEl) usersEl.value = (settings.allowedUserIds || []).join("\n");
             if (enabledEl) enabledEl.checked = settings.enabled || false;
         },
@@ -2852,10 +2858,12 @@ const BOT_UI_CONFIGS = {
                 throw new Error("启用 QQ 私聊机器人之前请填写 App ID 和 App Secret");
             }
 
+            const sshUsername = (document.getElementById("qqOfficialSshUsername")?.value || "admin").trim();
+
             return {
                 type: "qq-official",
                 enabled: enabled,
-                sshUsername: "admin",
+                sshUsername: sshUsername,
                 config: {
                     appId: appId,
                     appSecret: appSecret

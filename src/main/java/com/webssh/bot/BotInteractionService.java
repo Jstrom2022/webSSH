@@ -100,6 +100,11 @@ public class BotInteractionService {
     }
 
     public DisconnectResult disconnect(String botType, String userId) {
+        String userKey = userKey(botType, userId);
+        aiCliExecutor.stopAllForUser(userKey);
+        aiCliExecutor.clearAllSessions(userKey);
+        aiTaskStates.keySet().removeIf(key -> key.endsWith(":" + userKey));
+
         BotSshSessionManager.SshConnection conn = sshManager.getConnection(botType, userId);
         if (conn == null) {
             return new DisconnectResult(false, null);
@@ -143,9 +148,13 @@ public class BotInteractionService {
             return new StartAiTaskResult(false, "已有任务在运行", null);
         }
 
-        String workDir = "/tmp";
         BotSshSessionManager.SshConnection conn = sshManager.getConnection(botType, userId);
-        if (conn != null && conn.getCwd() != null && !conn.getCwd().isBlank()) {
+        if (conn == null) {
+            return new StartAiTaskResult(false, "未连接 SSH。请先使用 /connect 连接。", null);
+        }
+
+        String workDir = "/tmp";
+        if (conn.getCwd() != null && !conn.getCwd().isBlank()) {
             workDir = conn.getCwd();
         }
 
@@ -153,7 +162,9 @@ public class BotInteractionService {
         AiTaskState state = aiTaskStates.computeIfAbsent(stateKey, key -> new AiTaskState());
         state.start(prompt, workDir);
 
-        aiCliExecutor.execute(cliType, userKey, prompt, workDir, chunk -> {
+        aiCliExecutor.executeRemote(cliType, userKey, prompt, workDir,
+                command -> sshManager.startRemoteCommand(botType, userId, command),
+                chunk -> {
             state.append(chunk);
             if (outputCallback != null) {
                 outputCallback.accept(chunk);
