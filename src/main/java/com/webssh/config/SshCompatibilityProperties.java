@@ -31,6 +31,30 @@ public class SshCompatibilityProperties {
     private boolean allowLegacySshRsa = false;
 
     /**
+     * SSH keepalive 间隔（毫秒）。
+     * <p>
+     * 通过 JSch {@code setServerAliveInterval} 发送 keepalive 包，
+     * 避免空闲连接被中间网络设备或服务器提前断开。
+     * </p>
+     * <p>
+     * 配置项：{@code webssh.ssh.server-alive-interval-ms}
+     * </p>
+     */
+    private int serverAliveIntervalMs = 30_000;
+
+    /**
+     * SSH keepalive 最大连续失败次数。
+     * <p>
+     * 对应 JSch {@code setServerAliveCountMax}，
+     * 当连续发送 keepalive 失败超过该值时，JSch 会断开连接。
+     * </p>
+     * <p>
+     * 配置项：{@code webssh.ssh.server-alive-count-max}
+     * </p>
+     */
+    private int serverAliveCountMax = 3;
+
+    /**
      * 获取是否允许旧版 ssh-rsa 算法。
      *
      * @return true 表示允许，false 表示不允许（默认）
@@ -46,5 +70,41 @@ public class SshCompatibilityProperties {
      */
     public void setAllowLegacySshRsa(boolean allowLegacySshRsa) {
         this.allowLegacySshRsa = allowLegacySshRsa;
+    }
+
+    /**
+     * 获取 SSH keepalive 间隔（毫秒）。
+     *
+     * @return keepalive 间隔，<= 0 表示不启用
+     */
+    public int getServerAliveIntervalMs() {
+        return serverAliveIntervalMs;
+    }
+
+    /**
+     * 设置 SSH keepalive 间隔（毫秒）。
+     *
+     * @param serverAliveIntervalMs keepalive 间隔，<= 0 表示不启用
+     */
+    public void setServerAliveIntervalMs(int serverAliveIntervalMs) {
+        this.serverAliveIntervalMs = serverAliveIntervalMs;
+    }
+
+    /**
+     * 获取 SSH keepalive 最大连续失败次数。
+     *
+     * @return 最大失败次数，<= 0 表示使用 JSch 默认值
+     */
+    public int getServerAliveCountMax() {
+        return serverAliveCountMax;
+    }
+
+    /**
+     * 设置 SSH keepalive 最大连续失败次数。
+     *
+     * @param serverAliveCountMax 最大失败次数，<= 0 表示使用 JSch 默认值
+     */
+    public void setServerAliveCountMax(int serverAliveCountMax) {
+        this.serverAliveCountMax = serverAliveCountMax;
     }
 }

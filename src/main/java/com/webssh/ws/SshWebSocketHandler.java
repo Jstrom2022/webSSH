@@ -1494,6 +1494,14 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                 sshSession.setPassword(sessionConfig.password());
             }
             sshSession.setConfig(buildSshConfig(sshSession, sessionConfig.authType()));
+            int keepAliveIntervalMs = sshCompatibilityProperties.getServerAliveIntervalMs();
+            if (keepAliveIntervalMs > 0) {
+                sshSession.setServerAliveInterval(keepAliveIntervalMs);
+            }
+            int keepAliveCountMax = sshCompatibilityProperties.getServerAliveCountMax();
+            if (keepAliveCountMax > 0) {
+                sshSession.setServerAliveCountMax(keepAliveCountMax);
+            }
             sshSession.connect(10_000);
 
             String actualFingerprint = extractSha256Fingerprint(sshSession);
