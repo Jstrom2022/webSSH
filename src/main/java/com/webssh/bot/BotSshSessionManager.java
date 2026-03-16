@@ -50,8 +50,21 @@ public class BotSshSessionManager {
     /** 无新输出后的最大等待时间（毫秒） */
     private static final long OUTPUT_IDLE_TIMEOUT_MS = 3000;
 
+    /** Shell 工作目录标记字节 */
+    private static final byte SHELL_CWD_MARKER_START = 0x02;
+    private static final byte SHELL_CWD_MARKER_END = 0x03;
+    private static final byte[] SHELL_CWD_MARKER_PREFIX = "__WEBSSH_CWD__:".getBytes(StandardCharsets.US_ASCII);
+
+    /** 连接建立后注入的初始化命令 */
+    private static final List<String> SHELL_CWD_INIT_COMMANDS = List.of(
+            "__w(){ printf '\\002__WEBSSH_CWD__:%s\\003' \"$PWD\"; }",
+            "[ \"$ZSH_VERSION\" ] && eval 'precmd_functions+=(__w)'",
+            "[ \"$BASH_VERSION\" ] && eval 'PROMPT_COMMAND=\"__w${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"'",
+            "__w");
+
     private final SessionProfileStore profileStore;
     private final SshCompatibilityProperties sshProperties;
+    private final AiCliExecutor aiCliExecutor;
     private final ConcurrentMap<String, SshConnection> connections = new ConcurrentHashMap<>();
     private final ExecutorService outputExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "bot-ssh-output");
@@ -66,10 +79,11 @@ public class BotSshSessionManager {
         private final OutputStream inputWriter;
         private final InputStream outputReader;
         private final String profileName;
+        private volatile String cwd;
         private volatile boolean closed = false;
 
         SshConnection(Session session, ChannelShell channel, OutputStream inputWriter,
-                      InputStream outputReader, String profileName) {
+                InputStream outputReader, String profileName) {
             this.session = session;
             this.channel = channel;
             this.inputWriter = inputWriter;
@@ -79,6 +93,18 @@ public class BotSshSessionManager {
 
         public String getProfileName() {
             return profileName;
+        }
+
+        public String getCwd() {
+            return cwd;
+        }
+
+        public Session session() {
+            return session;
+        }
+
+        public ChannelShell channel() {
+            return channel;
         }
 
         public boolean isConnected() {
@@ -108,7 +134,9 @@ public class BotSshSessionManager {
                     if (available > 0) {
                         int read = outputReader.read(buf, 0, Math.min(available, buf.length));
                         if (read > 0) {
-                            sb.append(new String(buf, 0, read, StandardCharsets.UTF_8));
+                            // 提取 CWD 并清理标记
+                            byte[] cleaned = extractCwdAndStrip(buf, read);
+                            sb.append(new String(cleaned, 0, cleaned.length, StandardCharsets.UTF_8));
                             lastReadTime = System.currentTimeMillis();
                             // 防止输出过长
                             if (sb.length() > MAX_MESSAGE_LENGTH * 3) {
@@ -125,18 +153,80 @@ public class BotSshSessionManager {
             return sb.toString();
         }
 
+        /** 提取 CWD 标记并返回清理后的可见输出字节 */
+        private byte[] extractCwdAndStrip(byte[] data, int len) {
+            java.io.ByteArrayOutputStream visible = new java.io.ByteArrayOutputStream();
+            int offset = 0;
+            while (offset < len) {
+                int start = indexOf(data, SHELL_CWD_MARKER_START, offset, len);
+                if (start < 0) {
+                    visible.write(data, offset, len - offset);
+                    break;
+                }
+
+                // 写入标记前的部分
+                visible.write(data, offset, start - offset);
+
+                int prefixMatch = matchPrefix(data, start + 1, len);
+                if (prefixMatch < 0) {
+                    visible.write(data[start]);
+                    offset = start + 1;
+                    continue;
+                }
+
+                int pathStart = start + 1 + SHELL_CWD_MARKER_PREFIX.length;
+                int end = indexOf(data, SHELL_CWD_MARKER_END, pathStart, len);
+                if (end < 0) {
+                    // 如果这块数据由于截断没有结束符，后续可能会丢失这部分标记内容，但在 Bot 场景下可接受（比显示乱码强）
+                    break; 
+                }
+
+                if (end > pathStart) {
+                    this.cwd = new String(data, pathStart, end - pathStart, StandardCharsets.UTF_8);
+                }
+                offset = end + 1;
+            }
+            return visible.toByteArray();
+        }
+
+        private int indexOf(byte[] data, byte value, int from, int len) {
+            for (int i = from; i < len; i++) {
+                if (data[i] == value) return i;
+            }
+            return -1;
+        }
+
+        private int matchPrefix(byte[] data, int from, int len) {
+            if (from + SHELL_CWD_MARKER_PREFIX.length > len) return -1;
+            for (int i = 0; i < SHELL_CWD_MARKER_PREFIX.length; i++) {
+                if (data[from + i] != SHELL_CWD_MARKER_PREFIX[i]) return -1;
+            }
+            return from;
+        }
+
         public void close() {
             closed = true;
-            try { inputWriter.close(); } catch (Exception ignored) {}
-            try { channel.disconnect(); } catch (Exception ignored) {}
-            try { session.disconnect(); } catch (Exception ignored) {}
+            try {
+                inputWriter.close();
+            } catch (Exception ignored) {
+            }
+            try {
+                channel.disconnect();
+            } catch (Exception ignored) {
+            }
+            try {
+                session.disconnect();
+            } catch (Exception ignored) {
+            }
         }
     }
 
     public BotSshSessionManager(SessionProfileStore profileStore,
-                                SshCompatibilityProperties sshProperties) {
+            SshCompatibilityProperties sshProperties,
+            AiCliExecutor aiCliExecutor) {
         this.profileStore = profileStore;
         this.sshProperties = sshProperties;
+        this.aiCliExecutor = aiCliExecutor;
     }
 
     @PreDestroy
@@ -160,6 +250,10 @@ public class BotSshSessionManager {
         String key = connectionKey(botType, userId);
         SshConnection conn = connections.get(key);
         if (conn != null && !conn.isConnected()) {
+            log.info("检测到 SSH 连接失效 [{}], session={}, channel={}",
+                    key,
+                    conn.session().isConnected(),
+                    conn.channel().isConnected());
             connections.remove(key);
             conn.close();
             return null;
@@ -173,6 +267,8 @@ public class BotSshSessionManager {
         SshConnection conn = connections.remove(key);
         if (conn != null) {
             conn.close();
+            // 同时清除 AI 会话上下文，防止环境不一致
+            aiCliExecutor.clearAllSessions(botType + ":" + userId);
         }
     }
 
@@ -193,7 +289,7 @@ public class BotSshSessionManager {
      *
      * @param botType     机器人类型
      * @param userId      聊天用户 ID
-     * @param sshUsername  WebSSH 用户名
+     * @param sshUsername WebSSH 用户名
      * @param target      会话名称或序号（1-based）
      * @return 连接成功后的描述信息
      */
@@ -333,20 +429,32 @@ public class BotSshSessionManager {
             sshSession.connect(10_000);
 
             ChannelShell channel = (ChannelShell) sshSession.openChannel("shell");
-            channel.setPtyType("dumb");
+            channel.setPtyType("xterm-256color");
             channel.setPtySize(200, 50, 0, 0);
             InputStream outputReader = channel.getInputStream();
             OutputStream inputWriter = channel.getOutputStream();
             channel.connect(5_000);
 
-            // 消费初始登录输出（MOTD 等）
+            // 消费初始登录输出并注入目录追踪钩子
             SshConnection conn = new SshConnection(sshSession, channel, inputWriter, outputReader, profile.getName());
+            
+            // 异步注入初始化命令（不阻塞连接过程）
+            inputWriter.write(("{ stty -echo; } 2>/dev/null\n").getBytes(StandardCharsets.UTF_8));
+            for (String cmd : SHELL_CWD_INIT_COMMANDS) {
+                inputWriter.write((cmd + "\n").getBytes(StandardCharsets.UTF_8));
+            }
+            inputWriter.write(("{ stty echo; } 2>/dev/null\n").getBytes(StandardCharsets.UTF_8));
+            inputWriter.flush();
+
             conn.readAvailableOutput(1000, 2000);
 
             return conn;
         } catch (Exception e) {
             if (sshSession != null) {
-                try { sshSession.disconnect(); } catch (Exception ignored) {}
+                try {
+                    sshSession.disconnect();
+                } catch (Exception ignored) {
+                }
             }
             throw e;
         }
@@ -355,9 +463,9 @@ public class BotSshSessionManager {
     /** 去除 ANSI 转义序列 */
     private String stripAnsiCodes(String text) {
         return text.replaceAll("\\x1b\\[[0-9;]*[a-zA-Z]", "")
-                   .replaceAll("\\x1b\\][^\\x07]*\\x07", "")
-                   .replaceAll("\\x1b\\[\\?[0-9;]*[a-zA-Z]", "")
-                   .replaceAll("[\\x00-\\x08\\x0e-\\x1f]", "");
+                .replaceAll("\\x1b\\][^\\x07]*\\x07", "")
+                .replaceAll("\\x1b\\[\\?[0-9;]*[a-zA-Z]", "")
+                .replaceAll("[\\x00-\\x08\\x0e-\\x1f]", "");
     }
 
     /** 将长文本分批发送 */

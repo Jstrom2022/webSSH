@@ -180,9 +180,11 @@ public class TelegramBotProvider implements ChatBotProvider {
                 case "/codex" -> handleAiCli(chatId, userId, arg, AiCliExecutor.CliType.CODEX);
                 case "/codex_stop" -> handleAiCliStop(chatId, userId, AiCliExecutor.CliType.CODEX);
                 case "/codex_status" -> handleAiCliStatus(chatId, userId, AiCliExecutor.CliType.CODEX);
+                case "/codex_clear" -> handleAiCliClear(chatId, userId, AiCliExecutor.CliType.CODEX);
                 case "/claude" -> handleAiCli(chatId, userId, arg, AiCliExecutor.CliType.CLAUDE);
                 case "/claude_stop" -> handleAiCliStop(chatId, userId, AiCliExecutor.CliType.CLAUDE);
                 case "/claude_status" -> handleAiCliStatus(chatId, userId, AiCliExecutor.CliType.CLAUDE);
+                case "/claude_clear" -> handleAiCliClear(chatId, userId, AiCliExecutor.CliType.CLAUDE);
                 default -> sendText(chatId, "未知命令: " + cmd + "\n使用 /help 查看可用命令。");
             }
         }
@@ -190,21 +192,23 @@ public class TelegramBotProvider implements ChatBotProvider {
         private void handleStart(long chatId) {
             sendText(chatId, """
                     🖥️ *WebSSH Telegram Bot*
-                    
+
                     通过此机器人管理和使用 SSH 连接。
-                    
+
                     *SSH 命令:*
                     /list — 查看已保存的 SSH 会话
                     /connect <名称或序号> — 连接 SSH
                     /disconnect — 断开当前连接
                     /status — 查看连接状态
-                    
+
                     *AI 编程命令:*
                     /codex <提示词> — Codex AI 任务
                     /codex\\_stop — 停止 Codex 任务
+                    /codex\\_clear — 清除 Codex 会话 ID
                     /claude <提示词> — Claude Code 任务
                     /claude\\_stop — 停止 Claude 任务
-                    
+                    /claude\\_clear — 清除 Claude 会话 ID
+
                     连接后直接发送文字即执行 Shell 命令。""", true);
         }
 
@@ -295,16 +299,22 @@ public class TelegramBotProvider implements ChatBotProvider {
                 return;
             }
 
-            // 工作目录：未连接 SSH 时使用 /tmp
-            String workDir = null;
+            // 工作目录：优先使用 SSH 会话追踪到的当前目录，未连接时使用 /tmp
+            String workDir = "/tmp";
             BotSshSessionManager.SshConnection conn = sshManager.getConnection(TYPE, userId);
-            if (conn == null) {
-                workDir = "/tmp";
+            if (conn != null && conn.getCwd() != null) {
+                workDir = conn.getCwd();
             }
 
             aiCliExecutor.execute(cliType, userKey, prompt, workDir,
-                    output -> sendText(chatId, output),
+                    output -> sendText(chatId, output, true),
                     () -> log.debug("{} 任务结束 [{}]", name, userKey));
+        }
+
+        private void handleAiCliClear(long chatId, String userId, AiCliExecutor.CliType cliType) {
+            String userKey = TYPE + ":" + userId;
+            aiCliExecutor.clearSession(cliType, userKey);
+            sendText(chatId, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
         }
 
         private void handleAiCliStop(long chatId, String userId, AiCliExecutor.CliType cliType) {
@@ -339,7 +349,8 @@ public class TelegramBotProvider implements ChatBotProvider {
                     String chunk;
                     if (content.length() > 4000) {
                         int splitAt = content.lastIndexOf('\n', 4000);
-                        if (splitAt <= 0) splitAt = 4000;
+                        if (splitAt <= 0)
+                            splitAt = 4000;
                         chunk = content.substring(0, splitAt);
                         content = content.substring(splitAt);
                     } else {
@@ -372,12 +383,13 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
 
         private String escapeMarkdown(String text) {
-            if (text == null) return "";
+            if (text == null)
+                return "";
             return text.replace("_", "\\_")
-                       .replace("*", "\\*")
-                       .replace("[", "\\[")
-                       .replace("]", "\\]")
-                       .replace("`", "\\`");
+                    .replace("*", "\\*")
+                    .replace("[", "\\[")
+                    .replace("]", "\\]")
+                    .replace("`", "\\`");
         }
     }
 }

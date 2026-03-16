@@ -1048,6 +1048,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             while (!connection.isClosed() && webSocketSession.isOpen()) {
                 int read = outputReader.read(buf);
                 if (read < 0) {
+                    log.info("SSH 输出流读取到 EOF，准备关闭连接 [{}]", webSocketSession.getId());
                     break;
                 }
                 if (read == 0) {
@@ -1068,7 +1069,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             }
         } catch (IOException e) {
             if (connection.isConnected()) {
-                log.debug("读取 SSH 输出失败: {}", e.getMessage());
+                log.info("读取 SSH 输出异常 [{}], 原因: {}", webSocketSession.getId(), e.getMessage());
             }
         } finally {
             connection.close();
