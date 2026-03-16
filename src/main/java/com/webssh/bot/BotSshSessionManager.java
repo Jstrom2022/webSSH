@@ -1,6 +1,7 @@
 package com.webssh.bot;
 
 import com.jcraft.jsch.ChannelShell;
+import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
 import com.webssh.config.SshCompatibilityProperties;
@@ -11,6 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -19,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
@@ -30,7 +33,7 @@ import java.util.function.Consumer;
  * <p>
  * 每个聊天用户（通过 {@code botType:userId} 唯一标识）维护一个 SSH 连接。
  * 复用 {@link SessionProfileStore} 读取已保存的会话配置（含解密后的凭据），
- * 通过 JSch 建立 SSH 连接并开启 Shell 通道。
+ * 通过 JSch 建立 SSH 会话；普通命令使用独立的 exec 通道执行，避免长驻交互式 shell 的状态污染。
  * </p>
  */
 @Service
@@ -45,50 +48,99 @@ public class BotSshSessionManager {
     private static final int OUTPUT_BUFFER_SIZE = 8192;
 
     /** 命令执行后等待输出的初始延迟（毫秒） */
-    private static final long OUTPUT_INITIAL_DELAY_MS = 500;
+    private static final long OUTPUT_INITIAL_DELAY_MS = 100;
 
     /** 无新输出后的最大等待时间（毫秒） */
-    private static final long OUTPUT_IDLE_TIMEOUT_MS = 3000;
+    private static final long OUTPUT_IDLE_TIMEOUT_MS = 2000;
 
     /** Shell 工作目录标记字节 */
     private static final byte SHELL_CWD_MARKER_START = 0x02;
     private static final byte SHELL_CWD_MARKER_END = 0x03;
     private static final byte[] SHELL_CWD_MARKER_PREFIX = "__WEBSSH_CWD__:".getBytes(StandardCharsets.US_ASCII);
 
-    /** 连接建立后注入的初始化命令 */
-    private static final List<String> SHELL_CWD_INIT_COMMANDS = List.of(
-            "__w(){ printf '\\002__WEBSSH_CWD__:%s\\003' \"$PWD\"; }",
-            "[ \"$ZSH_VERSION\" ] && eval 'precmd_functions+=(__w)'",
-            "[ \"$BASH_VERSION\" ] && eval 'PROMPT_COMMAND=\"__w${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"'",
-            "__w");
-
     private final SessionProfileStore profileStore;
     private final SshCompatibilityProperties sshProperties;
     private final AiCliExecutor aiCliExecutor;
     private final ConcurrentMap<String, SshConnection> connections = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ReconnectContext> reconnectContexts = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Object> reconnectLocks = new ConcurrentHashMap<>();
     private final ExecutorService outputExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "bot-ssh-output");
         t.setDaemon(true);
         return t;
     });
 
+    record ConnectionSpec(
+            String profileName,
+            String username,
+            String host,
+            int port,
+            String authType,
+            String password,
+            String privateKey,
+            String passphrase) {
+        private static ConnectionSpec fromProfile(SshSessionProfile profile) {
+            return new ConnectionSpec(
+                    profile.getName(),
+                    profile.getUsername(),
+                    profile.getHost(),
+                    profile.getPort(),
+                    profile.getAuthType(),
+                    profile.getPassword(),
+                    profile.getPrivateKey(),
+                    profile.getPassphrase());
+        }
+    }
+
+    static final class ReconnectContext {
+        private final ConnectionSpec spec;
+        private volatile String lastKnownCwd;
+
+        private ReconnectContext(ConnectionSpec spec) {
+            this.spec = spec;
+        }
+
+        private String lastKnownCwd() {
+            return lastKnownCwd;
+        }
+
+        private void updateCwd(String cwd) {
+            if (cwd != null && !cwd.isBlank()) {
+                this.lastKnownCwd = cwd;
+            }
+        }
+    }
+
     /** SSH 连接状态封装 */
     public static class SshConnection {
         private final Session session;
         private final ChannelShell channel;
-        private final OutputStream inputWriter;
-        private final InputStream outputReader;
         private final String profileName;
+        private final ReconnectContext reconnectContext;
         private volatile String cwd;
         private volatile boolean closed = false;
+        private ChannelExec activeExecChannel;
+        private InputStream activeExecOutput;
 
         SshConnection(Session session, ChannelShell channel, OutputStream inputWriter,
                 InputStream outputReader, String profileName) {
+            this(session, channel, inputWriter, outputReader, profileName, null);
+        }
+
+        SshConnection(Session session, ChannelShell channel, OutputStream inputWriter,
+                InputStream outputReader, String profileName, ReconnectContext reconnectContext) {
+            this(session, channel, profileName, reconnectContext);
+        }
+
+        SshConnection(Session session, String profileName, ReconnectContext reconnectContext) {
+            this(session, null, profileName, reconnectContext);
+        }
+
+        SshConnection(Session session, ChannelShell channel, String profileName, ReconnectContext reconnectContext) {
             this.session = session;
             this.channel = channel;
-            this.inputWriter = inputWriter;
-            this.outputReader = outputReader;
             this.profileName = profileName;
+            this.reconnectContext = reconnectContext;
         }
 
         public String getProfileName() {
@@ -96,7 +148,7 @@ public class BotSshSessionManager {
         }
 
         public String getCwd() {
-            return cwd;
+            return cwd != null ? cwd : reconnectContext == null ? null : reconnectContext.lastKnownCwd();
         }
 
         public Session session() {
@@ -108,115 +160,98 @@ public class BotSshSessionManager {
         }
 
         public boolean isConnected() {
-            return !closed && session.isConnected() && channel.isConnected();
+            return !closed && session != null && session.isConnected();
         }
 
-        /** 发送命令到 Shell（自动追加换行符） */
-        public void sendCommand(String command) throws IOException {
+        /** 为当前命令创建独立 exec 通道，避免长驻 shell 状态污染。 */
+        public synchronized void sendCommand(String command) throws IOException {
             if (!isConnected()) {
                 throw new IOException("SSH 连接已断开");
             }
-            inputWriter.write((command + "\n").getBytes(StandardCharsets.UTF_8));
-            inputWriter.flush();
+            closeActiveExec();
+            try {
+                ChannelExec execChannel = (ChannelExec) session.openChannel("exec");
+                execChannel.setPty(true);
+                execChannel.setPtyType("xterm-256color");
+                execChannel.setCommand(BotSshSessionManager.buildExecCommand(command, getCwd()));
+                InputStream execOutput = execChannel.getInputStream();
+                execChannel.connect(5_000);
+                activeExecChannel = execChannel;
+                activeExecOutput = execOutput;
+            } catch (Exception e) {
+                closeActiveExec();
+                throw new IOException(e.getMessage(), e);
+            }
         }
 
-        /** 读取当前可用的 Shell 输出 */
-        public String readAvailableOutput(long initialDelayMs, long idleTimeoutMs) {
-            StringBuilder sb = new StringBuilder();
+        /** 读取当前命令的完整可见输出，并同步更新工作目录。 */
+        public synchronized String readAvailableOutput(long initialDelayMs, long idleTimeoutMs) {
+            ByteArrayOutputStream visibleBuffer = new ByteArrayOutputStream();
+            ChannelExec execChannel = activeExecChannel;
+            InputStream execOutput = activeExecOutput;
+            if (execChannel == null || execOutput == null) {
+                return "";
+            }
+
             byte[] buf = new byte[OUTPUT_BUFFER_SIZE];
             try {
-                // 等待命令开始输出
                 Thread.sleep(initialDelayMs);
 
                 long lastReadTime = System.currentTimeMillis();
                 while (System.currentTimeMillis() - lastReadTime < idleTimeoutMs) {
-                    int available = outputReader.available();
+                    int available = execOutput.available();
                     if (available > 0) {
-                        int read = outputReader.read(buf, 0, Math.min(available, buf.length));
+                        int read = execOutput.read(buf, 0, Math.min(available, buf.length));
                         if (read > 0) {
-                            // 提取 CWD 并清理标记
-                            byte[] cleaned = extractCwdAndStrip(buf, read);
-                            sb.append(new String(cleaned, 0, cleaned.length, StandardCharsets.UTF_8));
                             lastReadTime = System.currentTimeMillis();
-                            // 防止输出过长
-                            if (sb.length() > MAX_MESSAGE_LENGTH * 3) {
+                            visibleBuffer.write(buf, 0, read);
+                            if (visibleBuffer.size() > MAX_MESSAGE_LENGTH * 20) {
                                 break;
                             }
                         }
                     } else {
-                        Thread.sleep(100);
+                        Thread.sleep(50);
                     }
                 }
             } catch (IOException | InterruptedException e) {
                 log.debug("读取 SSH 输出异常: {}", e.getMessage());
+            } finally {
+                closeActiveExec();
             }
-            return sb.toString();
-        }
-
-        /** 提取 CWD 标记并返回清理后的可见输出字节 */
-        private byte[] extractCwdAndStrip(byte[] data, int len) {
-            java.io.ByteArrayOutputStream visible = new java.io.ByteArrayOutputStream();
-            int offset = 0;
-            while (offset < len) {
-                int start = indexOf(data, SHELL_CWD_MARKER_START, offset, len);
-                if (start < 0) {
-                    visible.write(data, offset, len - offset);
-                    break;
+            ExecResult result = BotSshSessionManager.parseExecResult(visibleBuffer.toByteArray());
+            if (result.cwd() != null && !result.cwd().isBlank()) {
+                this.cwd = result.cwd();
+                if (reconnectContext != null) {
+                    reconnectContext.updateCwd(this.cwd);
                 }
-
-                // 写入标记前的部分
-                visible.write(data, offset, start - offset);
-
-                int prefixMatch = matchPrefix(data, start + 1, len);
-                if (prefixMatch < 0) {
-                    visible.write(data[start]);
-                    offset = start + 1;
-                    continue;
-                }
-
-                int pathStart = start + 1 + SHELL_CWD_MARKER_PREFIX.length;
-                int end = indexOf(data, SHELL_CWD_MARKER_END, pathStart, len);
-                if (end < 0) {
-                    // 如果这块数据由于截断没有结束符，后续可能会丢失这部分标记内容，但在 Bot 场景下可接受（比显示乱码强）
-                    break; 
-                }
-
-                if (end > pathStart) {
-                    this.cwd = new String(data, pathStart, end - pathStart, StandardCharsets.UTF_8);
-                }
-                offset = end + 1;
             }
-            return visible.toByteArray();
-        }
-
-        private int indexOf(byte[] data, byte value, int from, int len) {
-            for (int i = from; i < len; i++) {
-                if (data[i] == value) return i;
-            }
-            return -1;
-        }
-
-        private int matchPrefix(byte[] data, int from, int len) {
-            if (from + SHELL_CWD_MARKER_PREFIX.length > len) return -1;
-            for (int i = 0; i < SHELL_CWD_MARKER_PREFIX.length; i++) {
-                if (data[from + i] != SHELL_CWD_MARKER_PREFIX[i]) return -1;
-            }
-            return from;
+            return result.output();
         }
 
         public void close() {
             closed = true;
+            closeActiveExec();
             try {
-                inputWriter.close();
-            } catch (Exception ignored) {
-            }
-            try {
-                channel.disconnect();
+                if (channel != null) {
+                    channel.disconnect();
+                }
             } catch (Exception ignored) {
             }
             try {
                 session.disconnect();
             } catch (Exception ignored) {
+            }
+        }
+
+        private void closeActiveExec() {
+            ChannelExec execChannel = activeExecChannel;
+            activeExecChannel = null;
+            activeExecOutput = null;
+            if (execChannel != null) {
+                try {
+                    execChannel.disconnect();
+                } catch (Exception ignored) {
+                }
             }
         }
     }
@@ -240,6 +275,10 @@ public class BotSshSessionManager {
         return botType + ":" + userId;
     }
 
+    private Object reconnectLock(String key) {
+        return reconnectLocks.computeIfAbsent(key, ignored -> new Object());
+    }
+
     /** 列出指定用户的 SSH 会话配置 */
     public List<SshSessionProfile> listProfiles(String sshUsername) {
         return profileStore.list(sshUsername);
@@ -247,29 +286,19 @@ public class BotSshSessionManager {
 
     /** 获取指定用户的当前连接 */
     public SshConnection getConnection(String botType, String userId) {
-        String key = connectionKey(botType, userId);
-        SshConnection conn = connections.get(key);
-        if (conn != null && !conn.isConnected()) {
-            log.info("检测到 SSH 连接失效 [{}], session={}, channel={}",
-                    key,
-                    conn.session().isConnected(),
-                    conn.channel().isConnected());
-            connections.remove(key);
-            conn.close();
-            return null;
-        }
-        return conn;
+        return findActiveConnection(connectionKey(botType, userId));
     }
 
     /** 断开指定用户的 SSH 连接 */
     public void disconnect(String botType, String userId) {
         String key = connectionKey(botType, userId);
         SshConnection conn = connections.remove(key);
+        aiCliExecutor.clearAllSessions(botType + ":" + userId);
         if (conn != null) {
             conn.close();
-            // 同时清除 AI 会话上下文，防止环境不一致
-            aiCliExecutor.clearAllSessions(botType + ":" + userId);
         }
+        reconnectContexts.remove(key);
+        reconnectLocks.remove(key);
     }
 
     /** 断开指定机器人类型的所有连接 */
@@ -279,9 +308,15 @@ public class BotSshSessionManager {
             if (key.startsWith(botType + ":")) {
                 toRemove.add(key);
                 conn.close();
+                String userKey = key.substring(botType.length() + 1);
+                aiCliExecutor.clearAllSessions(botType + ":" + userKey);
+                reconnectContexts.remove(key);
+                reconnectLocks.remove(key);
             }
         });
         toRemove.forEach(connections::remove);
+        reconnectContexts.keySet().removeIf(key -> key.startsWith(botType + ":"));
+        reconnectLocks.keySet().removeIf(key -> key.startsWith(botType + ":"));
     }
 
     /**
@@ -330,8 +365,11 @@ public class BotSshSessionManager {
         }
 
         // 建立 SSH 连接
-        SshConnection conn = openSshConnection(detail);
-        connections.put(connectionKey(botType, userId), conn);
+        String key = connectionKey(botType, userId);
+        ReconnectContext reconnectContext = new ReconnectContext(ConnectionSpec.fromProfile(detail));
+        SshConnection conn = openSshConnection(reconnectContext);
+        reconnectContexts.put(key, reconnectContext);
+        connections.put(key, conn);
 
         return String.format("✅ 已连接到 %s (%s@%s:%d)",
                 detail.getName(), detail.getUsername(), detail.getHost(), detail.getPort());
@@ -346,65 +384,70 @@ public class BotSshSessionManager {
      * @param callback 输出回调，可能被多次调用（分批发送）
      */
     public void executeCommand(String botType, String userId, String command, Consumer<String> callback) {
-        SshConnection conn = getConnection(botType, userId);
-        if (conn == null) {
-            callback.accept("❌ 未连接 SSH。请先使用 /connect 连接。");
-            return;
-        }
-
-        try {
-            conn.sendCommand(command);
-        } catch (IOException e) {
-            disconnect(botType, userId);
-            callback.accept("❌ 发送命令失败: " + e.getMessage());
-            return;
-        }
-
-        // 异步读取输出
-        outputExecutor.submit(() -> {
-            try {
-                String output = conn.readAvailableOutput(OUTPUT_INITIAL_DELAY_MS, OUTPUT_IDLE_TIMEOUT_MS);
-                if (output.isEmpty()) {
-                    callback.accept("(无输出)");
-                    return;
-                }
-                // 清理 ANSI 转义序列
-                output = stripAnsiCodes(output);
-                // 分批发送（Telegram 消息长度限制）
-                sendInChunks(output, callback);
-            } catch (Exception e) {
-                log.error("执行命令异常: {}", e.getMessage(), e);
-                callback.accept("❌ 读取输出失败: " + e.getMessage());
-            }
-        });
+        executeCommandAsync(botType, userId, command)
+                .whenComplete((output, error) -> {
+                    if (error != null) {
+                        callback.accept("❌ " + error.getMessage());
+                        return;
+                    }
+                    sendInChunks(output, callback);
+                });
     }
 
-    /** 建立 SSH 连接并打开 Shell 通道 */
-    private SshConnection openSshConnection(SshSessionProfile profile) throws Exception {
+    /** 异步执行命令并聚合完整输出，便于 QQ 等平台在单条消息中回复结果 */
+    public CompletableFuture<String> executeCommandAsync(String botType, String userId, String command) {
+        CompletableFuture<String> future = new CompletableFuture<>();
+        outputExecutor.submit(() -> {
+            try {
+                SshConnection conn = sendCommandWithReconnect(botType, userId, command);
+                String output = conn.readAvailableOutput(OUTPUT_INITIAL_DELAY_MS, OUTPUT_IDLE_TIMEOUT_MS);
+                if (output.isEmpty()) {
+                    future.complete("(无输出)");
+                    return;
+                }
+                future.complete(stripAnsiCodes(output));
+            } catch (IOException e) {
+                future.completeExceptionally(new IllegalStateException(e.getMessage(), e));
+            } catch (Exception e) {
+                log.error("执行命令异常: {}", e.getMessage(), e);
+                future.completeExceptionally(new IllegalStateException("读取输出失败: " + e.getMessage(), e));
+            }
+        });
+        return future;
+    }
+
+    /** 建立 SSH 会话，并用一次轻量 exec 初始化当前目录。 */
+    SshConnection openSshConnection(ReconnectContext reconnectContext) throws Exception {
+        return openSshConnection(reconnectContext.spec, reconnectContext, reconnectContext.lastKnownCwd());
+    }
+
+    /** 建立 SSH 会话，并在需要时恢复上次记录的工作目录。 */
+    SshConnection openSshConnection(ConnectionSpec spec, ReconnectContext reconnectContext, String restoreCwd)
+            throws Exception {
         JSch jsch = new JSch();
 
-        if ("PRIVATE_KEY".equalsIgnoreCase(profile.getAuthType())) {
-            byte[] passBytes = profile.getPassphrase() != null && !profile.getPassphrase().isBlank()
-                    ? profile.getPassphrase().getBytes(StandardCharsets.UTF_8)
+        if ("PRIVATE_KEY".equalsIgnoreCase(spec.authType())) {
+            byte[] passBytes = spec.passphrase() != null && !spec.passphrase().isBlank()
+                    ? spec.passphrase().getBytes(StandardCharsets.UTF_8)
                     : null;
             jsch.addIdentity(
                     "bot-ssh-key-" + UUID.randomUUID(),
-                    profile.getPrivateKey().getBytes(StandardCharsets.UTF_8),
+                    spec.privateKey().getBytes(StandardCharsets.UTF_8),
                     null,
                     passBytes);
         }
 
         Session sshSession = null;
         try {
-            sshSession = jsch.getSession(profile.getUsername(), profile.getHost(), profile.getPort());
-            if ("PASSWORD".equalsIgnoreCase(profile.getAuthType())) {
-                sshSession.setPassword(profile.getPassword());
+            sshSession = jsch.getSession(spec.username(), spec.host(), spec.port());
+            if ("PASSWORD".equalsIgnoreCase(spec.authType())) {
+                sshSession.setPassword(spec.password());
             }
 
             Properties config = new Properties();
             config.put("StrictHostKeyChecking", "no");
             config.put("PreferredAuthentications",
-                    "PASSWORD".equalsIgnoreCase(profile.getAuthType()) ? "password" : "publickey");
+                    "PASSWORD".equalsIgnoreCase(spec.authType()) ? "password" : "publickey");
             if (sshProperties.isAllowLegacySshRsa()) {
                 String hostKeyAlgos = sshSession.getConfig("server_host_key");
                 if (hostKeyAlgos != null && !hostKeyAlgos.contains("ssh-rsa")) {
@@ -428,25 +471,12 @@ public class BotSshSessionManager {
 
             sshSession.connect(10_000);
 
-            ChannelShell channel = (ChannelShell) sshSession.openChannel("shell");
-            channel.setPtyType("xterm-256color");
-            channel.setPtySize(200, 50, 0, 0);
-            InputStream outputReader = channel.getInputStream();
-            OutputStream inputWriter = channel.getOutputStream();
-            channel.connect(5_000);
-
-            // 消费初始登录输出并注入目录追踪钩子
-            SshConnection conn = new SshConnection(sshSession, channel, inputWriter, outputReader, profile.getName());
-            
-            // 异步注入初始化命令（不阻塞连接过程）
-            inputWriter.write(("{ stty -echo; } 2>/dev/null\n").getBytes(StandardCharsets.UTF_8));
-            for (String cmd : SHELL_CWD_INIT_COMMANDS) {
-                inputWriter.write((cmd + "\n").getBytes(StandardCharsets.UTF_8));
+            SshConnection conn = new SshConnection(sshSession, spec.profileName(), reconnectContext);
+            if (restoreCwd != null && !restoreCwd.isBlank()) {
+                conn.cwd = restoreCwd;
             }
-            inputWriter.write(("{ stty echo; } 2>/dev/null\n").getBytes(StandardCharsets.UTF_8));
-            inputWriter.flush();
-
-            conn.readAvailableOutput(1000, 2000);
+            conn.sendCommand("printf '%s' \"$PWD\"");
+            conn.readAvailableOutput(50, 500);
 
             return conn;
         } catch (Exception e) {
@@ -458,6 +488,79 @@ public class BotSshSessionManager {
             }
             throw e;
         }
+    }
+
+    private record ExecResult(String output, String cwd) {
+    }
+
+    private static String buildExecCommand(String command, String cwd) {
+        StringBuilder script = new StringBuilder();
+        if (cwd != null && !cwd.isBlank()) {
+            script.append("if [ -d ").append(shellQuote(cwd)).append(" ]; then cd -- ")
+                    .append(shellQuote(cwd)).append("; fi; ");
+        }
+        script.append("__webssh_cmd=").append(shellQuote(command)).append("; ");
+        script.append("eval \"$__webssh_cmd\" 2>&1; ");
+        script.append("__webssh_status=$?; ");
+        script.append("printf '\\002__WEBSSH_CWD__:%s\\003' \"$PWD\"; ");
+        script.append("exit $__webssh_status");
+        return script.toString();
+    }
+
+    private static ExecResult parseExecResult(byte[] raw) {
+        if (raw == null || raw.length == 0) {
+            return new ExecResult("", null);
+        }
+        int markerStart = lastIndexOf(raw, SHELL_CWD_MARKER_START);
+        if (markerStart < 0 || markerStart + 1 + SHELL_CWD_MARKER_PREFIX.length >= raw.length) {
+            return new ExecResult(new String(raw, StandardCharsets.UTF_8), null);
+        }
+        if (!startsWith(raw, markerStart + 1, SHELL_CWD_MARKER_PREFIX)) {
+            return new ExecResult(new String(raw, StandardCharsets.UTF_8), null);
+        }
+        int pathStart = markerStart + 1 + SHELL_CWD_MARKER_PREFIX.length;
+        int markerEnd = indexOf(raw, SHELL_CWD_MARKER_END, pathStart);
+        if (markerEnd < 0) {
+            return new ExecResult(new String(raw, StandardCharsets.UTF_8), null);
+        }
+
+        ByteArrayOutputStream visible = new ByteArrayOutputStream(raw.length);
+        visible.write(raw, 0, markerStart);
+        if (markerEnd + 1 < raw.length) {
+            visible.write(raw, markerEnd + 1, raw.length - markerEnd - 1);
+        }
+        String cwd = new String(raw, pathStart, markerEnd - pathStart, StandardCharsets.UTF_8);
+        return new ExecResult(visible.toString(StandardCharsets.UTF_8), cwd);
+    }
+
+    private static int indexOf(byte[] data, byte value, int from) {
+        for (int i = Math.max(from, 0); i < data.length; i++) {
+            if (data[i] == value) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int lastIndexOf(byte[] data, byte value) {
+        for (int i = data.length - 1; i >= 0; i--) {
+            if (data[i] == value) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean startsWith(byte[] data, int from, byte[] prefix) {
+        if (from < 0 || from + prefix.length > data.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (data[from + i] != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 去除 ANSI 转义序列 */
@@ -487,5 +590,86 @@ public class BotSshSessionManager {
             callback.accept(text.substring(offset, end));
             offset = end;
         }
+    }
+
+    private SshConnection findActiveConnection(String key) {
+        SshConnection conn = connections.get(key);
+        if (conn == null) {
+            return null;
+        }
+        if (conn.isConnected()) {
+            return conn;
+        }
+        log.info("检测到 SSH 连接已失效 [{}], session={}",
+                key,
+                conn.session().isConnected());
+        invalidateConnection(key, conn);
+        return null;
+    }
+
+    private void invalidateConnection(String key, SshConnection conn) {
+        if (conn == null) {
+            return;
+        }
+        connections.remove(key, conn);
+        conn.close();
+    }
+
+    private SshConnection ensureConnection(String botType, String userId) {
+        String key = connectionKey(botType, userId);
+        SshConnection conn = findActiveConnection(key);
+        if (conn != null) {
+            return conn;
+        }
+
+        ReconnectContext reconnectContext = reconnectContexts.get(key);
+        if (reconnectContext == null) {
+            return null;
+        }
+
+        synchronized (reconnectLock(key)) {
+            conn = findActiveConnection(key);
+            if (conn != null) {
+                return conn;
+            }
+            try {
+                SshConnection reopened = openSshConnection(reconnectContext);
+                connections.put(key, reopened);
+                log.info("SSH 连接已自动恢复 [{} -> {}@{}:{}]",
+                        key,
+                        reconnectContext.spec.username(),
+                        reconnectContext.spec.host(),
+                        reconnectContext.spec.port());
+                return reopened;
+            } catch (Exception e) {
+                log.warn("SSH 自动恢复失败 [{}]: {}", key, e.getMessage());
+                return null;
+            }
+        }
+    }
+
+    private SshConnection sendCommandWithReconnect(String botType, String userId, String command) throws IOException {
+        String key = connectionKey(botType, userId);
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            SshConnection conn = ensureConnection(botType, userId);
+            if (conn == null) {
+                throw new IOException("未连接 SSH。请先使用 /connect 连接。");
+            }
+            try {
+                conn.sendCommand(command);
+                return conn;
+            } catch (IOException e) {
+                lastError = e;
+                log.warn("发送 SSH 命令失败，准备重试 [{}][attempt={}]: {}", key, attempt, e.getMessage());
+                invalidateConnection(key, conn);
+            }
+        }
+        throw new IOException("发送命令失败: " + (lastError == null ? "未知错误" : lastError.getMessage()),
+                lastError);
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 }

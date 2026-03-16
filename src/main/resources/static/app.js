@@ -2747,19 +2747,102 @@ bootstrap();
 
 // ==================== 机器人设置面板逻辑 ====================
 
+const BOT_UI_CONFIGS = {
+    "telegram": {
+        type: "telegram",
+        saveButtonId: "telegramSaveBtn",
+        restartButtonId: "telegramRestartBtn",
+        badgeId: "telegramRunningBadge",
+        indicatorId: "telegramStatusIndicator",
+        statusTextId: "telegramStatusText",
+        fill(settings) {
+            const config = settings.config || {};
+            const tokenEl = document.getElementById("telegramBotToken");
+            const usernameEl = document.getElementById("telegramBotUsername");
+            const allowedEl = document.getElementById("telegramAllowedUsers");
+            const enabledEl = document.getElementById("telegramEnabled");
+
+            if (tokenEl) tokenEl.value = config.token || "";
+            if (usernameEl) usernameEl.value = config.botUsername || "";
+            if (allowedEl) allowedEl.value = (settings.allowedUserIds || []).join("\n");
+            if (enabledEl) enabledEl.checked = settings.enabled || false;
+        },
+        buildPayload() {
+            const token = (document.getElementById("telegramBotToken")?.value || "").trim();
+            const botUsername = (document.getElementById("telegramBotUsername")?.value || "").trim();
+            const enabled = document.getElementById("telegramEnabled")?.checked || false;
+            const allowedUserIds = parseTextareaLines(document.getElementById("telegramAllowedUsers")?.value);
+
+            if (enabled && (!token || !botUsername)) {
+                throw new Error("启用 Telegram Bot 之前请填写 Token 和 Username");
+            }
+
+            return {
+                type: "telegram",
+                enabled: enabled,
+                sshUsername: "admin",
+                config: {
+                    token: token,
+                    botUsername: botUsername
+                },
+                allowedUserIds: allowedUserIds
+            };
+        }
+    },
+    "qq-official": {
+        type: "qq-official",
+        saveButtonId: "qqOfficialSaveBtn",
+        restartButtonId: "qqOfficialRestartBtn",
+        badgeId: "qqOfficialRunningBadge",
+        indicatorId: "qqOfficialStatusIndicator",
+        statusTextId: "qqOfficialStatusText",
+        fill(settings) {
+            const config = settings.config || {};
+            const appIdEl = document.getElementById("qqOfficialAppId");
+            const secretEl = document.getElementById("qqOfficialAppSecret");
+            const usersEl = document.getElementById("qqOfficialAllowedUsers");
+            const enabledEl = document.getElementById("qqOfficialEnabled");
+
+            if (appIdEl) appIdEl.value = config.appId || "";
+            if (secretEl) secretEl.value = config.appSecret || "";
+            if (usersEl) usersEl.value = (settings.allowedUserIds || []).join("\n");
+            if (enabledEl) enabledEl.checked = settings.enabled || false;
+        },
+        buildPayload() {
+            const appId = (document.getElementById("qqOfficialAppId")?.value || "").trim();
+            const appSecret = (document.getElementById("qqOfficialAppSecret")?.value || "").trim();
+            const enabled = document.getElementById("qqOfficialEnabled")?.checked || false;
+            const allowedUserIds = parseTextareaLines(document.getElementById("qqOfficialAllowedUsers")?.value);
+
+            if (enabled && (!appId || !appSecret)) {
+                throw new Error("启用 QQ 私聊机器人之前请填写 App ID 和 App Secret");
+            }
+
+            return {
+                type: "qq-official",
+                enabled: enabled,
+                sshUsername: "admin",
+                config: {
+                    appId: appId,
+                    appSecret: appSecret
+                },
+                allowedUserIds: allowedUserIds
+            };
+        }
+    }
+};
+
 function initBotSettings() {
     const openBtn = document.getElementById("openBotSettingsBtn");
     const closeBtn = document.getElementById("closeBotDrawerBtn");
     const drawer = document.getElementById("botSettingsDrawer");
-    const saveBtn = document.getElementById("saveBotSettingsBtn");
-    const restartBtn = document.getElementById("restartBotBtn");
 
     if (!openBtn || !drawer) return;
 
     openBtn.addEventListener("click", () => {
         drawer.classList.toggle("open");
         if (drawer.classList.contains("open")) {
-            loadBotSettings();
+            loadAllBotSettings();
         }
     });
 
@@ -2769,92 +2852,68 @@ function initBotSettings() {
         });
     }
 
-    if (saveBtn) {
-        saveBtn.addEventListener("click", saveBotSettings);
-    }
-
-    if (restartBtn) {
-        restartBtn.addEventListener("click", restartBot);
-    }
+    Object.values(BOT_UI_CONFIGS).forEach((config) => {
+        const saveBtn = document.getElementById(config.saveButtonId);
+        const restartBtn = document.getElementById(config.restartButtonId);
+        if (saveBtn) {
+            saveBtn.addEventListener("click", () => saveBotSettings(config));
+        }
+        if (restartBtn) {
+            restartBtn.addEventListener("click", () => restartBot(config));
+        }
+    });
 
     // 初始加载状态
-    loadBotStatus();
+    loadAllBotStatuses();
 }
 
-async function loadBotSettings() {
+function parseTextareaLines(value) {
+    const text = (value || "").trim();
+    return text ? text.split("\n").map(s => s.trim()).filter(Boolean) : [];
+}
+
+async function loadAllBotSettings() {
     try {
-        const resp = await fetch("/api/bot-settings/telegram");
-        if (!resp.ok) return;
-        const settings = await resp.json();
-
-        const tokenEl = document.getElementById("botToken");
-        const usernameEl = document.getElementById("botUsername");
-        const allowedEl = document.getElementById("botAllowedUsers");
-        const enabledEl = document.getElementById("botEnabled");
-
-        if (tokenEl && settings.config) tokenEl.value = settings.config.token || "";
-        if (usernameEl && settings.config) usernameEl.value = settings.config.botUsername || "";
-        if (allowedEl) allowedEl.value = (settings.allowedUserIds || []).join("\n");
-        if (enabledEl) enabledEl.checked = settings.enabled || false;
-
-        updateBotStatusUI(settings);
+        await Promise.all(Object.values(BOT_UI_CONFIGS).map(loadBotSettings));
     } catch (e) {
         console.error("加载机器人设置失败:", e);
     }
-
-    // 同时加载运行状态
-    loadBotStatus();
+    loadAllBotStatuses();
 }
 
-async function saveBotSettings() {
-    const tokenEl = document.getElementById("botToken");
-    const usernameEl = document.getElementById("botUsername");
-    const allowedEl = document.getElementById("botAllowedUsers");
-    const enabledEl = document.getElementById("botEnabled");
-    const saveBtn = document.getElementById("saveBotSettingsBtn");
+async function loadBotSettings(config) {
+    const resp = await fetch(`/api/bot-settings/${config.type}`);
+    if (!resp.ok) return;
+    const settings = await resp.json();
+    config.fill(settings);
+    updateBotEnabledUI(config, settings.enabled || false);
+}
 
-    const token = (tokenEl?.value || "").trim();
-    const botUsername = (usernameEl?.value || "").trim();
-    const allowedText = (allowedEl?.value || "").trim();
-    const enabled = enabledEl?.checked || false;
-
-    if (enabled && (!token || !botUsername)) {
-        alert("启用 Bot 之前请填写 Token 和 Username");
+async function saveBotSettings(config) {
+    const saveBtn = document.getElementById(config.saveButtonId);
+    let body;
+    try {
+        body = config.buildPayload();
+    } catch (e) {
+        alert(e.message);
         return;
     }
 
-    const allowedUserIds = allowedText
-        ? allowedText.split("\n").map(s => s.trim()).filter(s => s)
-        : [];
-
-    const body = {
-        type: "telegram",
-        enabled: enabled,
-        sshUsername: "admin",
-        config: {
-            token: token,
-            botUsername: botUsername
-        },
-        allowedUserIds: allowedUserIds
-    };
-
-    if (saveBtn) {
-        saveBtn.disabled = true;
-        saveBtn.querySelector("span").textContent = "保存中...";
-    }
-
     try {
-        const resp = await fetch("/api/bot-settings/telegram", {
+        if (saveBtn) {
+            saveBtn.disabled = true;
+            saveBtn.querySelector("span").textContent = "保存中...";
+        }
+
+        const resp = await fetch(`/api/bot-settings/${config.type}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body)
         });
-        if (!resp.ok) {
-            throw new Error("保存失败: " + resp.status);
-        }
-        // 等待一会儿让 Bot 启动
+        if (!resp.ok) throw new Error("保存失败: " + resp.status);
         await new Promise(r => setTimeout(r, 1500));
-        await loadBotStatus();
+        await loadBotSettings(config);
+        await loadAllBotStatuses();
     } catch (e) {
         alert("保存失败: " + e.message);
     } finally {
@@ -2865,21 +2924,21 @@ async function saveBotSettings() {
     }
 }
 
-async function restartBot() {
-    const restartBtn = document.getElementById("restartBotBtn");
-    if (restartBtn) {
-        restartBtn.disabled = true;
-        restartBtn.querySelector("span").textContent = "重启中...";
-    }
-
+async function restartBot(config) {
+    const restartBtn = document.getElementById(config.restartButtonId);
     try {
-        const resp = await fetch("/api/bot-settings/telegram/restart", { method: "POST" });
-        const result = await resp.json();
-        if (!result.success) {
-            alert("重启失败: " + result.message);
+        if (restartBtn) {
+            restartBtn.disabled = true;
+            restartBtn.querySelector("span").textContent = "重启中...";
+        }
+
+        const resp = await fetch(`/api/bot-settings/${config.type}/restart`, { method: "POST" });
+        const status = await resp.json();
+        if (status.success === false) {
+            throw new Error(status.message || "重启失败");
         }
         await new Promise(r => setTimeout(r, 1500));
-        await loadBotStatus();
+        await loadAllBotStatuses();
     } catch (e) {
         alert("重启失败: " + e.message);
     } finally {
@@ -2890,33 +2949,39 @@ async function restartBot() {
     }
 }
 
-async function loadBotStatus() {
+async function loadAllBotStatuses() {
+    const results = await Promise.all(Object.values(BOT_UI_CONFIGS).map(loadBotStatus));
+    updateBotTriggerDot(results.some(Boolean));
+}
+
+async function loadBotStatus(config) {
     try {
-        const resp = await fetch("/api/bot-settings/telegram/status");
-        if (!resp.ok) return;
+        const resp = await fetch(`/api/bot-settings/${config.type}/status`);
+        if (!resp.ok) return false;
         const status = await resp.json();
-        updateBotRunningUI(status.running, status.statusMessage);
+        updateBotRunningUI(config, status.running, status.statusMessage);
+        return !!status.running;
     } catch (e) {
-        // 静默失败
+        updateBotRunningUI(config, false, "状态获取失败");
+        return false;
     }
 }
 
-function updateBotStatusUI(settings) {
-    const badge = document.getElementById("botRunningBadge");
+function updateBotEnabledUI(config, enabled) {
+    const badge = document.getElementById(config.badgeId);
     if (badge) {
-        badge.style.display = settings.enabled ? "" : "none";
+        badge.style.display = enabled ? "" : "none";
+        if (!enabled) {
+            badge.textContent = "已停用";
+        }
     }
 }
 
-function updateBotRunningUI(running, message) {
-    const dot = document.getElementById("botStatusDot");
-    const indicator = document.getElementById("botStatusIndicator");
-    const statusText = document.getElementById("botStatusText");
-    const badge = document.getElementById("botRunningBadge");
+function updateBotRunningUI(config, running, message) {
+    const indicator = document.getElementById(config.indicatorId);
+    const statusText = document.getElementById(config.statusTextId);
+    const badge = document.getElementById(config.badgeId);
 
-    if (dot) {
-        dot.classList.toggle("running", running);
-    }
     if (indicator) {
         indicator.className = "bot-indicator " + (running ? "bot-indicator-running" : "bot-indicator-stopped");
     }
@@ -2929,3 +2994,9 @@ function updateBotRunningUI(running, message) {
     }
 }
 
+function updateBotTriggerDot(anyRunning) {
+    const dot = document.getElementById("botStatusDot");
+    if (dot) {
+        dot.classList.toggle("running", anyRunning);
+    }
+}

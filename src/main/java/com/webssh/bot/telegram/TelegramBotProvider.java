@@ -1,9 +1,9 @@
 package com.webssh.bot.telegram;
 
 import com.webssh.bot.BotSettings;
-import com.webssh.bot.BotSshSessionManager;
-import com.webssh.bot.ChatBotProvider;
 import com.webssh.bot.AiCliExecutor;
+import com.webssh.bot.BotInteractionService;
+import com.webssh.bot.ChatBotProvider;
 import com.webssh.session.SshSessionProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +34,7 @@ public class TelegramBotProvider implements ChatBotProvider {
     private static final Logger log = LoggerFactory.getLogger(TelegramBotProvider.class);
     private static final String TYPE = "telegram";
 
-    private final BotSshSessionManager sshManager;
-    private final AiCliExecutor aiCliExecutor;
+    private final BotInteractionService interactionService;
 
     private volatile TelegramBotsApi botsApi;
     private volatile InternalBot bot;
@@ -43,9 +42,8 @@ public class TelegramBotProvider implements ChatBotProvider {
     private volatile String statusMessage = "未启动";
     private volatile DefaultBotSession botSession;
 
-    public TelegramBotProvider(BotSshSessionManager sshManager, AiCliExecutor aiCliExecutor) {
-        this.sshManager = sshManager;
-        this.aiCliExecutor = aiCliExecutor;
+    public TelegramBotProvider(BotInteractionService interactionService) {
+        this.interactionService = interactionService;
     }
 
     @Override
@@ -101,7 +99,7 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
         bot = null;
         botsApi = null;
-        sshManager.disconnectAll(TYPE);
+        interactionService.disconnectAll(TYPE);
         statusMessage = "已停止";
     }
 
@@ -213,7 +211,7 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
 
         private void handleList(long chatId) {
-            List<SshSessionProfile> profiles = sshManager.listProfiles(sshUsername);
+            List<SshSessionProfile> profiles = interactionService.listProfiles(sshUsername);
             if (profiles.isEmpty()) {
                 sendText(chatId, "📋 没有已保存的 SSH 会话。\n请在 WebSSH 界面中添加会话配置。");
                 return;
@@ -242,7 +240,7 @@ public class TelegramBotProvider implements ChatBotProvider {
 
             sendText(chatId, "⏳ 正在连接...");
             try {
-                String result = sshManager.connect(TYPE, userId, sshUsername, target);
+                String result = interactionService.connect(TYPE, userId, sshUsername, target);
                 sendText(chatId, result);
             } catch (Exception e) {
                 sendText(chatId, "❌ 连接失败: " + e.getMessage());
@@ -250,34 +248,32 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
 
         private void handleDisconnect(long chatId, String userId) {
-            BotSshSessionManager.SshConnection conn = sshManager.getConnection(TYPE, userId);
-            if (conn == null) {
+            BotInteractionService.DisconnectResult result = interactionService.disconnect(TYPE, userId);
+            if (!result.disconnected()) {
                 sendText(chatId, "当前没有活跃的 SSH 连接。");
                 return;
             }
-            String name = conn.getProfileName();
-            sshManager.disconnect(TYPE, userId);
-            sendText(chatId, "🔌 已断开与 " + name + " 的连接。");
+            sendText(chatId, "🔌 已断开与 " + result.profileName() + " 的连接。");
         }
 
         private void handleStatus(long chatId, String userId) {
-            BotSshSessionManager.SshConnection conn = sshManager.getConnection(TYPE, userId);
-            if (conn == null) {
+            BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, userId);
+            if (!status.connected()) {
                 sendText(chatId, "📊 状态: 未连接\n使用 /list 查看可用会话，/connect 连接。");
             } else {
-                sendText(chatId, "📊 状态: 已连接到 *" + escapeMarkdown(conn.getProfileName()) + "*\n"
+                sendText(chatId, "📊 状态: 已连接到 *" + escapeMarkdown(status.profileName()) + "*\n"
                         + "直接发送文字执行命令，/disconnect 断开。", true);
             }
         }
 
         private void handleShellInput(long chatId, String userId, String text) {
-            BotSshSessionManager.SshConnection conn = sshManager.getConnection(TYPE, userId);
-            if (conn == null) {
+            BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, userId);
+            if (!status.connected()) {
                 sendText(chatId, "未连接 SSH。请先使用 /connect 连接。\n使用 /list 查看可用会话。");
                 return;
             }
 
-            sshManager.executeCommand(TYPE, userId, text, output -> {
+            interactionService.executeShellCommand(TYPE, userId, text, output -> {
                 sendText(chatId, "```\n" + output + "\n```", true);
             });
         }
@@ -293,33 +289,26 @@ public class TelegramBotProvider implements ChatBotProvider {
                 return;
             }
 
-            String userKey = TYPE + ":" + userId;
-            if (aiCliExecutor.isRunning(cliType, userKey)) {
+            if (interactionService.isAiTaskRunning(TYPE, userId, cliType)) {
                 sendText(chatId, "⚠️ 已有 " + name + " 任务在运行。\n使用 /" + cmdName + "\\_stop 停止后再试。", true);
                 return;
             }
 
-            // 工作目录：优先使用 SSH 会话追踪到的当前目录，未连接时使用 /tmp
-            String workDir = "/tmp";
-            BotSshSessionManager.SshConnection conn = sshManager.getConnection(TYPE, userId);
-            if (conn != null && conn.getCwd() != null) {
-                workDir = conn.getCwd();
-            }
-
-            aiCliExecutor.execute(cliType, userKey, prompt, workDir,
+            BotInteractionService.StartAiTaskResult result = interactionService.startAiTask(TYPE, userId, prompt, cliType,
                     output -> sendText(chatId, output, true),
-                    () -> log.debug("{} 任务结束 [{}]", name, userKey));
+                    () -> log.debug("{} 任务结束 [{}:{}]", name, TYPE, userId));
+            if (!result.started()) {
+                sendText(chatId, "❌ " + result.message());
+            }
         }
 
         private void handleAiCliClear(long chatId, String userId, AiCliExecutor.CliType cliType) {
-            String userKey = TYPE + ":" + userId;
-            aiCliExecutor.clearSession(cliType, userKey);
+            interactionService.clearAiSession(TYPE, userId, cliType);
             sendText(chatId, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
         }
 
         private void handleAiCliStop(long chatId, String userId, AiCliExecutor.CliType cliType) {
-            String userKey = TYPE + ":" + userId;
-            if (aiCliExecutor.stop(cliType, userKey)) {
+            if (interactionService.stopAiTask(TYPE, userId, cliType)) {
                 sendText(chatId, "🛑 " + cliType.getDisplayName() + " 任务已停止。");
             } else {
                 sendText(chatId, "当前没有正在运行的 " + cliType.getDisplayName() + " 任务。");
@@ -327,10 +316,9 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
 
         private void handleAiCliStatus(long chatId, String userId, AiCliExecutor.CliType cliType) {
-            String userKey = TYPE + ":" + userId;
             String name = cliType.getDisplayName();
             String cmdName = cliType.name().toLowerCase();
-            if (aiCliExecutor.isRunning(cliType, userKey)) {
+            if (interactionService.isAiTaskRunning(TYPE, userId, cliType)) {
                 sendText(chatId, "📊 " + name + " 状态: ⏳ 任务执行中...");
             } else {
                 sendText(chatId, "📊 " + name + " 状态: 空闲\n使用 `/" + cmdName + " <提示词>` 启动任务。", true);

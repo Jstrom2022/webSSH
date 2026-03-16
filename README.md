@@ -18,6 +18,7 @@
 - **国际化** — 支持 7 种语言（简体中文、English、日本語、한국어、Deutsch、Français、Русский）
 - **全屏模式** — 终端可切换全屏显示
 - **移动端适配** — 响应式 Web 设计，针对手机端优化布局、侧边栏滑动及文件管理交互
+- **聊天机器人接入** — 支持 Telegram Bot 与 QQ 私聊机器人，可直接通过消息管理 SSH 与 AI 编程任务
 
 ## 技术栈
 
@@ -244,6 +245,47 @@ webssh.ssh.allow-legacy-ssh-rsa=true
 | `GET` | `/api/sessions/{id}` | 获取会话详情（含解密凭据） |
 | `POST` | `/api/sessions` | 新增或更新会话 |
 | `DELETE` | `/api/sessions/{id}` | 删除会话 |
+
+## 机器人能力
+
+### 支持的机器人类型
+
+- **Telegram Bot**：使用 Long Polling，无需公网回调
+- **QQ 私聊机器人**：按 OpenClaw 同款方式直连官方 OpenAPI + Gateway，当前支持与机器人私聊触发
+
+### 机器人命令
+
+两种机器人共用同一套核心命令：
+
+- SSH：`/list`、`/connect`、`/disconnect`、`/status`
+- AI：`/codex`、`/codex_stop`、`/codex_status`、`/codex_clear`
+- AI：`/claude`、`/claude_stop`、`/claude_status`、`/claude_clear`
+
+连接 SSH 后，直接发送普通文本即可作为 Shell 命令执行。
+
+### QQ 私聊机器人说明
+
+- 在管理面板中填写 `App ID`、`App Secret`
+- 当前只支持**与机器人私聊**，不支持群聊
+- 采用与 OpenClaw `qqbot` 插件一致的直连方式：`AppID + AppSecret + Gateway WebSocket`
+- **无需配置回调地址**
+- 可按需配置“允许的用户 ID”白名单；留空表示不额外限制
+- 由于 QQ 机器人有回复频控限制，SSH 与 AI 输出采用**聚合回复**，不会像 Telegram 那样持续刷屏推送
+
+### 机器人配置接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/bot-settings` | 获取所有机器人 provider 和配置 |
+| `GET` | `/api/bot-settings/{type}` | 获取指定机器人配置 |
+| `POST` | `/api/bot-settings/{type}` | 保存并应用指定机器人配置 |
+| `GET` | `/api/bot-settings/{type}/status` | 获取指定机器人运行状态 |
+| `POST` | `/api/bot-settings/{type}/restart` | 重启指定机器人 |
+
+当前内置的 `type`：
+
+- `telegram`
+- `qq-official`
 
 ## SFTP 说明
 

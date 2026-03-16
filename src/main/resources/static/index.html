@@ -137,7 +137,6 @@
             </div>
 
             <div class="drawer-body">
-                <!-- Telegram Bot 配置卡片 -->
                 <div class="drawer-card">
                     <div class="drawer-card-header">
                         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
@@ -145,20 +144,20 @@
                             <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path>
                         </svg>
                         <span>Telegram Bot</span>
-                        <span id="botRunningBadge" class="card-badge" style="display:none;">运行中</span>
+                        <span id="telegramRunningBadge" class="card-badge" style="display:none;">运行中</span>
                     </div>
                     <div class="drawer-card-body">
                         <div class="form-group">
                             <label>Bot Token</label>
-                            <input id="botToken" type="password" placeholder="从 @BotFather 获取的 Token" autocomplete="off">
+                            <input id="telegramBotToken" type="password" placeholder="从 @BotFather 获取的 Token" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label>Bot Username</label>
-                            <input id="botUsername" type="text" placeholder="如 my_webssh_bot（不含 @）" autocomplete="off">
+                            <input id="telegramBotUsername" type="text" placeholder="如 my_webssh_bot（不含 @）" autocomplete="off">
                         </div>
                         <div class="form-group">
                             <label>允许的用户 ID</label>
-                            <textarea id="botAllowedUsers" rows="3" placeholder="每行一个 Telegram 用户 ID&#10;留空则所有人可用"></textarea>
+                            <textarea id="telegramAllowedUsers" rows="3" placeholder="每行一个 Telegram 用户 ID&#10;留空则所有人可用"></textarea>
                             <div class="form-hint">发送 /start 给 Bot 可获取你的用户 ID</div>
                         </div>
                         <div class="form-group form-toggle-row">
@@ -172,51 +171,106 @@
                                 <span>启用 Bot</span>
                             </div>
                             <label class="toggle-switch">
-                                <input id="botEnabled" type="checkbox">
+                                <input id="telegramEnabled" type="checkbox">
                                 <span class="toggle-slider"></span>
                             </label>
                         </div>
-                    </div>
-                </div>
-
-                <!-- 运行状态卡片 -->
-                <div class="drawer-card drawer-card-subtle">
-                    <div class="drawer-card-header">
-                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-                        </svg>
-                        <span>运行状态</span>
-                    </div>
-                    <div class="drawer-card-body">
                         <div class="bot-status-display">
-                            <span id="botStatusIndicator" class="bot-indicator bot-indicator-stopped"></span>
-                            <span id="botStatusText">未配置</span>
+                            <span id="telegramStatusIndicator" class="bot-indicator bot-indicator-stopped"></span>
+                            <span id="telegramStatusText">未配置</span>
+                        </div>
+                        <div class="bot-card-actions">
+                            <button id="telegramSaveBtn" class="drawer-primary-btn">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                    <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                    <polyline points="7 3 7 8 15 8"></polyline>
+                                </svg>
+                                <span>保存并应用</span>
+                            </button>
+                            <button id="telegramRestartBtn" class="secondary">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                <span>重启</span>
+                            </button>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- 底部操作栏 -->
-            <div class="drawer-footer">
-                <div class="drawer-footer-row">
-                    <button id="saveBotSettingsBtn" class="drawer-primary-btn">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                <div class="drawer-card">
+                    <div class="drawer-card-header">
+                        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
                             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
-                            <polyline points="17 21 17 13 7 13 7 21"></polyline>
-                            <polyline points="7 3 7 8 15 8"></polyline>
+                            <path d="M4 7h16"></path>
+                            <path d="M4 12h10"></path>
+                            <path d="M4 17h8"></path>
+                            <path d="M19 14v6"></path>
+                            <path d="M16 17h6"></path>
                         </svg>
-                        <span>保存并应用</span>
-                    </button>
-                    <button id="restartBotBtn" class="secondary">
-                        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
-                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="23 4 23 10 17 10"></polyline>
-                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
-                        </svg>
-                        <span>重启</span>
-                    </button>
+                        <span>QQ 私聊机器人</span>
+                        <span id="qqOfficialRunningBadge" class="card-badge" style="display:none;">运行中</span>
+                    </div>
+                    <div class="drawer-card-body">
+                        <div class="form-group">
+                            <label>App ID</label>
+                            <input id="qqOfficialAppId" type="text" placeholder="QQ 机器人 App ID" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label>App Secret</label>
+                            <input id="qqOfficialAppSecret" type="password" placeholder="QQ 机器人 App Secret" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <div class="form-hint">按 OpenClaw 同款方式直连 QQ Gateway，无需配置回调地址。</div>
+                        </div>
+                        <div class="form-group">
+                            <label>允许的用户 ID（可选）</label>
+                            <textarea id="qqOfficialAllowedUsers" rows="3" placeholder="每行一个 QQ 用户 ID&#10;留空则不额外限制"></textarea>
+                            <div class="form-hint">这类机器人默认只支持私聊，通常留空即可，由平台侧权限控制可用用户。</div>
+                        </div>
+                        <div class="form-group form-toggle-row">
+                            <div class="toggle-label">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="2" y1="12" x2="22" y2="12"></line>
+                                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                                </svg>
+                                <span>启用 Bot</span>
+                            </div>
+                            <label class="toggle-switch">
+                                <input id="qqOfficialEnabled" type="checkbox">
+                                <span class="toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="form-hint">仅支持与机器人私聊，不支持群聊。</div>
+                        <div class="bot-status-display">
+                            <span id="qqOfficialStatusIndicator" class="bot-indicator bot-indicator-stopped"></span>
+                            <span id="qqOfficialStatusText">未配置</span>
+                        </div>
+                        <div class="bot-card-actions">
+                            <button id="qqOfficialSaveBtn" class="drawer-primary-btn">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                    <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                    <polyline points="7 3 7 8 15 8"></polyline>
+                                </svg>
+                                <span>保存并应用</span>
+                            </button>
+                            <button id="qqOfficialRestartBtn" class="secondary">
+                                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                                    stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                <span>重启</span>
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

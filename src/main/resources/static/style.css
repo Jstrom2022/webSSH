@@ -2066,3 +2066,13 @@ button:disabled {
     margin-top: 4px;
     font-style: italic;
 }
+
+.bot-card-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.bot-card-actions > button {
+    flex: 1;
+}

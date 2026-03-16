@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -107,6 +108,9 @@ public class AiCliExecutor {
                 pb.redirectErrorStream(true);
                 // 确保子进程能找到正确的 PATH
                 pb.environment().put("TERM", "dumb");
+                if (workDir != null && !workDir.isBlank()) {
+                    pb.directory(new File(workDir));
+                }
                 process = pb.start();
                 runningProcesses.put(processKey, process);
 
@@ -172,6 +176,21 @@ public class AiCliExecutor {
         return false;
     }
 
+    /** 停止指定机器人类型的所有 AI CLI 任务，并清理对应会话上下文 */
+    public void stopAllForBotType(String botType) {
+        if (botType == null || botType.isBlank()) {
+            return;
+        }
+
+        runningProcesses.forEach((key, process) -> {
+            if (belongsToBotType(key, botType) && process != null && process.isAlive()) {
+                process.destroyForcibly();
+                runningProcesses.remove(key, process);
+            }
+        });
+        userSessionIds.keySet().removeIf(key -> belongsToBotType(key, botType));
+    }
+
     /** 检查是否有任务在运行 */
     public boolean isRunning(CliType cliType, String userKey) {
         Process process = runningProcesses.get(processKey(cliType, userKey));
@@ -189,6 +208,11 @@ public class AiCliExecutor {
 
     private String processKey(CliType cliType, String userKey) {
         return cliType.name() + ":" + userKey;
+    }
+
+    private boolean belongsToBotType(String processKey, String botType) {
+        String prefix = ":" + botType + ":";
+        return processKey != null && processKey.contains(prefix);
     }
 
     // ==================== 命令构建 ====================

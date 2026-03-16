@@ -28,13 +28,16 @@ public class BotSettings {
      * 机器人特定配置项。
      * <p>
      * 对于 Telegram：token, botUsername
-     * 对于 QQ（未来）：appId, appSecret 等
+     * 对于 QQ：appId, appSecret 等
      * </p>
      */
     private Map<String, String> config = new LinkedHashMap<>();
 
     /** 允许使用此机器人的用户 ID 列表 */
     private List<String> allowedUserIds = new ArrayList<>();
+
+    /** 允许使用此机器人的群 ID 列表，保留兼容旧版 QQ 群聊配置 */
+    private List<String> allowedGroupIds = new ArrayList<>();
 
     public String getType() {
         return type;
@@ -74,5 +77,13 @@ public class BotSettings {
 
     public void setAllowedUserIds(List<String> allowedUserIds) {
         this.allowedUserIds = allowedUserIds;
+    }
+
+    public List<String> getAllowedGroupIds() {
+        return allowedGroupIds;
+    }
+
+    public void setAllowedGroupIds(List<String> allowedGroupIds) {
+        this.allowedGroupIds = allowedGroupIds;
     }
 }
