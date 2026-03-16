@@ -27,6 +27,7 @@ import java.util.Map;
 @RequestMapping("/api/sessions")
 public class SessionProfileController {
 
+    /** 会话配置存储服务（按当前登录用户隔离数据）。 */
     private final SessionProfileStore store;
 
     public SessionProfileController(SessionProfileStore store) {
@@ -80,6 +81,7 @@ public class SessionProfileController {
      */
     @PostMapping
     public SshSessionProfile save(@RequestBody SshSessionProfile profile, Principal principal) {
+        // 存储层会执行字段校验、规范化与凭据加密。
         return store.save(principal.getName(), profile);
     }
 

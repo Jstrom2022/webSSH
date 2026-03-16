@@ -390,6 +390,12 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    /**
+     * 定时清理长期未完成的上传会话等临时资源。
+     * <p>
+     * 该任务由单线程调度器周期执行，异常仅记录 debug，避免影响后续调度周期。
+     * </p>
+     */
     private void cleanupStaleResources() {
         try {
             long now = System.currentTimeMillis();
@@ -1509,6 +1515,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         trySetShellEnv(channel, "LC_CTYPE", DEFAULT_SHELL_UTF8_LOCALE);
     }
 
+    /** 安全设置单个 shell 环境变量，失败时仅记录调试日志。 */
     private void trySetShellEnv(ChannelShell channel, String key, String value) {
         try {
             channel.setEnv(key, value);
@@ -1845,10 +1852,15 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
      * </ul>
      */
     private static final class ClientConnection {
+        /** 前端 WebSocket 会话。 */
         private final WebSocketSession webSocketSession;
+        /** 串行化写入 SSH 输入流，防止并发 write 混乱。 */
         private final Object writeLock = new Object();
+        /** 保护 sharedSftpClient 的生命周期操作。 */
         private final Object sftpLock = new Object();
+        /** 过滤 shell 输出中的内部控制信息。 */
         private final ShellOutputFilter shellOutputFilter = new ShellOutputFilter();
+        /** 连接关闭标记，保证 close 幂等。 */
         private final AtomicBoolean closed = new AtomicBoolean(false);
 
         private volatile Session sshSession;
@@ -1865,10 +1877,17 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             this.webSocketSession = webSocketSession;
         }
 
+        /** @return 当前 WebSocket 会话对象 */
         private WebSocketSession webSocketSession() {
             return webSocketSession;
         }
 
+        /**
+         * 绑定一组新的 SSH 资源到当前连接。
+         * <p>
+         * 会先清空旧的上传/下载/SFTP 状态，避免跨重连复用脏状态。
+         * </p>
+         */
         private void attach(Session sshSession,
                 ChannelShell channel,
                 OutputStream inputWriter,
@@ -1887,10 +1906,12 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             shellOutputFilter.reset();
         }
 
+        /** @return 是否已经进入关闭态 */
         private boolean isClosed() {
             return closed.get();
         }
 
+        /** @return SSH session 与 shell channel 是否都处于可用状态 */
         private boolean isConnected() {
             return !closed.get()
                     && sshSession != null
@@ -1899,10 +1920,12 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                     && channel.isConnected();
         }
 
+        /** @return 仅检查 session 级连通性（用于 SFTP 场景） */
         private boolean hasSessionConnected() {
             return sshSession != null && sshSession.isConnected();
         }
 
+        /** 向远端 shell 写入输入数据（UTF-8 编码）。 */
         private void write(String data) throws IOException {
             OutputStream writer = this.inputWriter;
             if (writer == null) {
@@ -1920,6 +1943,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             shellOutputFilter.armInitialization(List.of("{ stty -echo; } 2>/dev/null"));
         }
 
+        /** 对本次读取到的 shell 输出做过滤。 */
         private ShellOutputChunk filterShellOutput(byte[] data, int len) {
             return shellOutputFilter.consume(data, len);
         }
@@ -1940,35 +1964,43 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return sftpSessionConfig;
         }
 
+        /** 新增或替换一条端口转发规则。 */
         private void addForward(PortForwardRule rule) {
             forwardRules.put(rule.key(), rule);
         }
 
+        /** 按 direction+bindHost+bindPort 删除并返回端口转发规则。 */
         private PortForwardRule removeForward(String direction, String bindHost, int bindPort) {
             return forwardRules.remove(PortForwardRule.keyOf(direction, bindHost, bindPort));
         }
 
+        /** 获取端口转发规则快照，避免并发遍历 map。 */
         private List<PortForwardRule> forwardsSnapshot() {
             return new ArrayList<>(forwardRules.values());
         }
 
+        /** 注册上传上下文。 */
         private void putUpload(String uploadId, UploadContext context) {
             uploads.put(uploadId, context);
         }
 
+        /** 查询上传上下文。 */
         private UploadContext upload(String uploadId) {
             return uploads.get(uploadId);
         }
 
+        /** 删除上传上下文并返回旧值。 */
         private UploadContext removeUpload(String uploadId) {
             return uploads.remove(uploadId);
         }
 
+        /** 关闭并清空所有上传上下文。 */
         private void closeUploads() {
             uploads.values().forEach(UploadContext::close);
             uploads.clear();
         }
 
+        /** 清理超时未完成的上传会话，防止输出流长期泄漏。 */
         private void cleanupStaleUploads(long now, long timeoutMs) {
             uploads.entrySet().removeIf(entry -> {
                 if (now - entry.getValue().createdAt() > timeoutMs) {
@@ -1980,6 +2012,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             });
         }
 
+        /** 创建下载 ACK 状态，若已有同 ID 下载则先关闭旧状态。 */
         private void startDownload(String downloadId) {
             DownloadState previous = downloads.put(downloadId, new DownloadState());
             if (previous != null) {
@@ -1987,6 +2020,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             }
         }
 
+        /** 标记某个下载分块已被前端确认。 */
         private void ackDownload(String downloadId, long chunkIndex) {
             DownloadState state = downloads.get(downloadId);
             if (state == null) {
@@ -1995,6 +2029,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             state.ack(chunkIndex);
         }
 
+        /** 等待前端确认某个下载分块。 */
         private boolean awaitDownloadAck(String downloadId, long chunkIndex, long timeoutMs) {
             DownloadState state = downloads.get(downloadId);
             if (state == null) {
@@ -2003,6 +2038,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return state.awaitAck(chunkIndex, timeoutMs);
         }
 
+        /** 下载结束后回收 ACK 状态对象。 */
         private void finishDownload(String downloadId) {
             DownloadState state = downloads.remove(downloadId);
             if (state != null) {
@@ -2010,11 +2046,13 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             }
         }
 
+        /** 关闭并清空所有下载状态。 */
         private void closeDownloads() {
             downloads.values().forEach(DownloadState::close);
             downloads.clear();
         }
 
+        /** 关闭共享 SFTP 客户端。 */
         private void closeSharedSftp() {
             synchronized (sftpLock) {
                 closeQuietly(sharedSftpClient);
@@ -2022,6 +2060,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             }
         }
 
+        /** 关闭当前连接持有的全部资源。 */
         private void close() {
             if (!closed.compareAndSet(false, true)) {
                 return;
@@ -2053,6 +2092,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             forwardRules.clear();
         }
 
+        /** 内部静默关闭工具。 */
         private void closeQuietly(AutoCloseable closeable) {
             if (closeable == null) {
                 return;
@@ -2120,6 +2160,17 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             }
         }
 
+        /**
+         * 消费一段 shell 输出并解析为“可见输出 + cwd 更新”。
+         * <p>
+         * 解析策略：
+         * 1) 在缓冲区中同时查找 cwd 标记与待过滤回显；
+         * 2) 将普通文本写入 visible；
+         * 3) 命中 cwd 标记时提取路径并从可见输出中移除；
+         * 4) 命中待过滤回显时整段跳过；
+         * 5) 末尾残留不完整片段回写 buffer，等待下一批数据拼接。
+         * </p>
+         */
         private ShellOutputChunk consume(byte[] data, int len) {
             if (len <= 0) {
                 return ShellOutputChunk.EMPTY;
@@ -2127,6 +2178,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             buffer.write(data, 0, len);
 
             if (buffer.size() > SHELL_OUTPUT_BUFFER_LIMIT) {
+                // 超限时直接降级为“不过滤透传”，并清空待过滤状态避免后续持续膨胀。
                 byte[] overflow = buffer.toByteArray();
                 buffer.reset();
                 pendingInitEchoLines.clear();
@@ -2145,6 +2197,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
                 if (eventPos < 0) {
                     if (!pendingInitEchoLines.isEmpty()) {
+                        // 仍处于初始化过滤阶段时，仅输出到最后一个换行，避免半行被误判。
                         int lastLineBreak = lastLineBreak(current, offset, current.length);
                         if (lastLineBreak >= offset) {
                             visible.write(current, offset, lastLineBreak + 1 - offset);
@@ -2177,6 +2230,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                 if (offset == nextEcho) {
                     byte[] line = pendingInitEchoLines.get(0);
                     if (!startsWith(current, offset, line)) {
+                        // 防御性处理：定位到疑似位置但不完整匹配时按普通字节透传。
                         visible.write(current[offset]);
                         offset += 1;
                         continue;
@@ -2191,9 +2245,11 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
                 if (offset == nextMarker) {
                     if (current.length < offset + 1 + SHELL_CWD_MARKER_PREFIX.length) {
+                        // marker 被拆包，保留到下次继续解析。
                         break;
                     }
                     if (!startsWith(current, offset + 1, SHELL_CWD_MARKER_PREFIX)) {
+                        // 起始字节碰撞但非合法 marker，按普通字节处理。
                         visible.write(current[offset]);
                         offset += 1;
                         continue;
@@ -2212,6 +2268,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
             buffer.reset();
             if (offset < current.length) {
+                // 保留尾部未消费片段（通常是不完整 marker 或回显行）。
                 buffer.write(current, offset, current.length - offset);
             }
             if (visible.size() == 0 && cwdPaths.isEmpty()) {
@@ -2220,6 +2277,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return new ShellOutputChunk(visible.toByteArray(), cwdPaths);
         }
 
+        /** 查找下一条待过滤初始化回显在 data 中的位置。 */
         private int nextPendingEchoPosition(byte[] data, int fromIndex) {
             if (pendingInitEchoLines.isEmpty()) {
                 return -1;
@@ -2227,6 +2285,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return indexOf(data, pendingInitEchoLines.get(0), fromIndex);
         }
 
+        /** 返回两个位置中最早的有效位置（忽略 -1）。 */
         private static int earliestPositive(int a, int b) {
             if (a < 0) {
                 return b;
@@ -2237,6 +2296,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return Math.min(a, b);
         }
 
+        /** 在指定区间逆向查找最后一个换行符位置。 */
         private static int lastLineBreak(byte[] data, int fromInclusive, int toExclusive) {
             for (int i = toExclusive - 1; i >= fromInclusive; i--) {
                 if (data[i] == '\n' || data[i] == '\r') {
@@ -2246,6 +2306,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return -1;
         }
 
+        /** 从 fromIndex 起查找某个字节。 */
         private static int indexOf(byte[] data, byte value, int fromIndex) {
             for (int i = Math.max(fromIndex, 0); i < data.length; i++) {
                 if (data[i] == value) {
@@ -2255,6 +2316,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return -1;
         }
 
+        /** 从 fromIndex 起查找字节模式。 */
         private static int indexOf(byte[] data, byte[] pattern, int fromIndex) {
             if (pattern.length == 0) {
                 return Math.max(fromIndex, 0);
@@ -2267,6 +2329,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return -1;
         }
 
+        /** 判断从 offset 开始是否匹配给定字节模式。 */
         private static boolean startsWith(byte[] data, int offset, byte[] pattern) {
             if (offset < 0 || offset + pattern.length > data.length) {
                 return false;
@@ -2292,6 +2355,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         private long ackedChunkIndex = -1L;
         private boolean closed;
 
+        /** 更新已确认的最大分块索引并唤醒等待线程。 */
         private synchronized void ack(long chunkIndex) {
             if (chunkIndex > ackedChunkIndex) {
                 ackedChunkIndex = chunkIndex;
@@ -2299,6 +2363,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             notifyAll();
         }
 
+        /** 阻塞等待 chunkIndex 被确认，超时或关闭返回 false。 */
         private synchronized boolean awaitAck(long chunkIndex, long timeoutMs) {
             long deadline = System.currentTimeMillis() + timeoutMs;
             while (!closed && ackedChunkIndex < chunkIndex) {
@@ -2316,6 +2381,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return !closed && ackedChunkIndex >= chunkIndex;
         }
 
+        /** 关闭状态并唤醒所有等待者。 */
         private synchronized void close() {
             closed = true;
             notifyAll();
@@ -2345,6 +2411,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             this.remoteWriter = remoteWriter;
         }
 
+        /** 写入一个上传分片并累加已写入字节数。 */
         private synchronized void write(byte[] bytes) throws IOException {
             if (bytes.length == 0) {
                 return;
@@ -2354,18 +2421,22 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             bytesWritten += bytes.length;
         }
 
+        /** @return 当前上传会话累计写入字节数 */
         private synchronized long bytesWritten() {
             return bytesWritten;
         }
 
+        /** @return 远端目标路径 */
         private String path() {
             return path;
         }
 
+        /** @return 上传会话创建时间戳（毫秒） */
         private long createdAt() {
             return createdAt;
         }
 
+        /** 关闭上传输出流和 SFTP 客户端。 */
         private void close() {
             try {
                 remoteWriter.close();
@@ -2391,10 +2462,12 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             int bindPort,
             String targetHost,
             int targetPort) {
+        /** 规则唯一键。 */
         private String key() {
             return keyOf(direction, bindHost, bindPort);
         }
 
+        /** 规则键生成器：direction|bindHost|bindPort。 */
         private static String keyOf(String direction, String bindHost, int bindPort) {
             return direction + "|" + bindHost + "|" + bindPort;
         }

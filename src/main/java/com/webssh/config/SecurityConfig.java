@@ -48,6 +48,7 @@ public class SecurityConfig {
                 // 使用自定义登录页，登录成功后重定向到首页
                 .formLogin(form -> form
                         .loginPage("/login")
+                        // 第二个参数 true 表示总是跳转首页，不回到“之前被拦截的 URL”。
                         .defaultSuccessUrl("/", true)
                         .permitAll()
                 )

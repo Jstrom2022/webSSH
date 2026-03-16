@@ -36,10 +36,15 @@ public class TelegramBotProvider implements ChatBotProvider {
 
     private final BotInteractionService interactionService;
 
+    /** Telegram Bot API 入口对象。 */
     private volatile TelegramBotsApi botsApi;
+    /** 当前运行中的 Bot 实例。 */
     private volatile InternalBot bot;
+    /** 运行状态标记。 */
     private volatile boolean running = false;
+    /** UI 展示状态描述。 */
     private volatile String statusMessage = "未启动";
+    /** 长轮询会话对象，用于 stop 时主动关闭。 */
     private volatile DefaultBotSession botSession;
 
     public TelegramBotProvider(BotInteractionService interactionService) {
@@ -60,6 +65,7 @@ public class TelegramBotProvider implements ChatBotProvider {
     public void start(BotSettings settings) throws Exception {
         stop();
 
+        // Telegram 参数全部来自 bot-settings 配置。
         String token = settings.getConfig().get("token");
         String botUsername = settings.getConfig().get("botUsername");
         if (token == null || token.isBlank()) {
@@ -136,6 +142,7 @@ public class TelegramBotProvider implements ChatBotProvider {
 
         @Override
         public void onUpdateReceived(Update update) {
+            // 仅处理文本消息，其他类型（图片/文件）直接忽略。
             if (!update.hasMessage() || !update.getMessage().hasText()) {
                 return;
             }
@@ -153,6 +160,7 @@ public class TelegramBotProvider implements ChatBotProvider {
 
             try {
                 if (text.startsWith("/")) {
+                    // /命令 走管理逻辑；普通文本按 Shell 命令执行。
                     handleCommand(chatId, userId, text);
                 } else {
                     handleShellInput(chatId, userId, text);
@@ -187,6 +195,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** /start 与 /help 共用说明文本。 */
         private void handleStart(long chatId) {
             sendText(chatId, """
                     🖥️ *WebSSH Telegram Bot*
@@ -210,6 +219,7 @@ public class TelegramBotProvider implements ChatBotProvider {
                     连接后直接发送文字即执行 Shell 命令。""", true);
         }
 
+        /** 列出当前 WebSSH 用户可用的 SSH 会话。 */
         private void handleList(long chatId) {
             List<SshSessionProfile> profiles = interactionService.listProfiles(sshUsername);
             if (profiles.isEmpty()) {
@@ -232,6 +242,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             sendText(chatId, sb.toString(), true);
         }
 
+        /** 建立 SSH 连接。target 支持“序号”或“名称”。 */
         private void handleConnect(long chatId, String userId, String target) {
             if (target.isEmpty()) {
                 sendText(chatId, "用法: /connect <会话名称或序号>\n例如: `/connect 1` 或 `/connect MyVPS`", true);
@@ -247,6 +258,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 断开当前 Telegram 用户绑定的 SSH 连接。 */
         private void handleDisconnect(long chatId, String userId) {
             BotInteractionService.DisconnectResult result = interactionService.disconnect(TYPE, userId);
             if (!result.disconnected()) {
@@ -256,6 +268,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             sendText(chatId, "🔌 已断开与 " + result.profileName() + " 的连接。");
         }
 
+        /** 查询 SSH 连接状态。 */
         private void handleStatus(long chatId, String userId) {
             BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, userId);
             if (!status.connected()) {
@@ -266,6 +279,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 普通文本按 Shell 命令执行，并将输出包裹为代码块。 */
         private void handleShellInput(long chatId, String userId, String text) {
             BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, userId);
             if (!status.connected()) {
@@ -280,6 +294,7 @@ public class TelegramBotProvider implements ChatBotProvider {
 
         // ========== AI CLI 通用命令 ==========
 
+        /** 启动 AI CLI 任务并将流式输出推送到聊天窗口。 */
         private void handleAiCli(long chatId, String userId, String prompt, AiCliExecutor.CliType cliType) {
             String name = cliType.getDisplayName();
             String cmdName = cliType.name().toLowerCase();
@@ -302,11 +317,13 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 清理 AI 会话上下文。 */
         private void handleAiCliClear(long chatId, String userId, AiCliExecutor.CliType cliType) {
             interactionService.clearAiSession(TYPE, userId, cliType);
             sendText(chatId, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
         }
 
+        /** 停止运行中的 AI 任务。 */
         private void handleAiCliStop(long chatId, String userId, AiCliExecutor.CliType cliType) {
             if (interactionService.stopAiTask(TYPE, userId, cliType)) {
                 sendText(chatId, "🛑 " + cliType.getDisplayName() + " 任务已停止。");
@@ -315,6 +332,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 查询 AI 任务运行状态。 */
         private void handleAiCliStatus(long chatId, String userId, AiCliExecutor.CliType cliType) {
             String name = cliType.getDisplayName();
             String cmdName = cliType.name().toLowerCase();
@@ -329,6 +347,12 @@ public class TelegramBotProvider implements ChatBotProvider {
             sendText(chatId, text, false);
         }
 
+        /**
+         * 发送消息到 Telegram。
+         * <p>
+         * Telegram 单条消息有限长，这里按 4000 字符分片发送。
+         * </p>
+         */
         private void sendText(long chatId, String text, boolean markdown) {
             try {
                 // 分批发送超长消息
@@ -370,6 +394,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 转义 Telegram Markdown 保留字符，避免消息渲染失败。 */
         private String escapeMarkdown(String text) {
             if (text == null)
                 return "";

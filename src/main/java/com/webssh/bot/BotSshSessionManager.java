@@ -58,18 +58,26 @@ public class BotSshSessionManager {
     private static final byte SHELL_CWD_MARKER_END = 0x03;
     private static final byte[] SHELL_CWD_MARKER_PREFIX = "__WEBSSH_CWD__:".getBytes(StandardCharsets.US_ASCII);
 
+    /** 读取 SSH 会话配置与凭据。 */
     private final SessionProfileStore profileStore;
+    /** SSH 兼容性相关配置（如 ssh-rsa 兜底）。 */
     private final SshCompatibilityProperties sshProperties;
+    /** AI CLI 执行器，用于连接断开时同步清理任务上下文。 */
     private final AiCliExecutor aiCliExecutor;
+    /** 活跃 SSH 连接表，key=botType:userId。 */
     private final ConcurrentMap<String, SshConnection> connections = new ConcurrentHashMap<>();
+    /** 自动重连所需的连接参数与 cwd 上下文。 */
     private final ConcurrentMap<String, ReconnectContext> reconnectContexts = new ConcurrentHashMap<>();
+    /** 每个连接独立重连锁，避免并发请求触发重复重连。 */
     private final ConcurrentMap<String, Object> reconnectLocks = new ConcurrentHashMap<>();
+    /** 命令输出读取线程池。 */
     private final ExecutorService outputExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "bot-ssh-output");
         t.setDaemon(true);
         return t;
     });
 
+    /** 建连所需的最小参数快照，供断线重连复用。 */
     record ConnectionSpec(
             String profileName,
             String username,
@@ -79,6 +87,7 @@ public class BotSshSessionManager {
             String password,
             String privateKey,
             String passphrase) {
+        /** 从完整会话配置转换为重连快照。 */
         private static ConnectionSpec fromProfile(SshSessionProfile profile) {
             return new ConnectionSpec(
                     profile.getName(),
@@ -92,6 +101,7 @@ public class BotSshSessionManager {
         }
     }
 
+    /** 重连上下文：连接参数 + 最近工作目录。 */
     static final class ReconnectContext {
         private final ConnectionSpec spec;
         private volatile String lastKnownCwd;
@@ -104,6 +114,7 @@ public class BotSshSessionManager {
             return lastKnownCwd;
         }
 
+        /** 仅在 cwd 非空时更新，避免被异常空值覆盖。 */
         private void updateCwd(String cwd) {
             if (cwd != null && !cwd.isBlank()) {
                 this.lastKnownCwd = cwd;
@@ -121,14 +132,17 @@ public class BotSshSessionManager {
             this.output = output;
         }
 
+        /** @return 远端命令标准输出流（已包含 stderr 重定向内容） */
         public InputStream output() {
             return output;
         }
 
+        /** @return 命令是否仍在执行中 */
         public boolean isRunning() {
             return channel != null && channel.isConnected() && !channel.isClosed();
         }
 
+        /** 阻塞等待远端命令结束并返回 exit code。 */
         public int waitForExit() throws InterruptedException {
             while (isRunning()) {
                 Thread.sleep(100);
@@ -136,6 +150,7 @@ public class BotSshSessionManager {
             return channel == null ? -1 : channel.getExitStatus();
         }
 
+        /** 主动停止远端命令。 */
         public void stop() {
             if (channel == null) {
                 return;
@@ -179,22 +194,30 @@ public class BotSshSessionManager {
             this.reconnectContext = reconnectContext;
         }
 
+        /** @return 当前连接对应的配置名称 */
         public String getProfileName() {
             return profileName;
         }
 
+        /**
+         * @return 当前工作目录
+         *         若本连接尚未记录 cwd，则回退到重连上下文中的最后目录
+         */
         public String getCwd() {
             return cwd != null ? cwd : reconnectContext == null ? null : reconnectContext.lastKnownCwd();
         }
 
+        /** @return 底层 SSH session */
         public Session session() {
             return session;
         }
 
+        /** @return 交互 shell 通道（当前实现通常为 null，仅保留兼容） */
         public ChannelShell channel() {
             return channel;
         }
 
+        /** @return 连接是否可用 */
         public boolean isConnected() {
             return !closed && session != null && session.isConnected();
         }
@@ -249,6 +272,7 @@ public class BotSshSessionManager {
 
             byte[] buf = new byte[OUTPUT_BUFFER_SIZE];
             try {
+                // 给远端命令一点启动时间，降低“刚启动就读取到空输出”的概率。
                 Thread.sleep(initialDelayMs);
 
                 long lastReadTime = System.currentTimeMillis();
@@ -260,6 +284,7 @@ public class BotSshSessionManager {
                             lastReadTime = System.currentTimeMillis();
                             visibleBuffer.write(buf, 0, read);
                             if (visibleBuffer.size() > MAX_MESSAGE_LENGTH * 20) {
+                                // 防止极端场景输出无限膨胀占满内存。
                                 break;
                             }
                         }
@@ -274,6 +299,7 @@ public class BotSshSessionManager {
             }
             ExecResult result = BotSshSessionManager.parseExecResult(visibleBuffer.toByteArray());
             if (result.cwd() != null && !result.cwd().isBlank()) {
+                // 命令返回后同步 cwd，后续命令默认在最新目录执行。
                 this.cwd = result.cwd();
                 if (reconnectContext != null) {
                     reconnectContext.updateCwd(this.cwd);
@@ -282,6 +308,7 @@ public class BotSshSessionManager {
             return result.output();
         }
 
+        /** 关闭连接与关联通道。该方法可重复调用。 */
         public void close() {
             closed = true;
             closeActiveExec();
@@ -297,6 +324,7 @@ public class BotSshSessionManager {
             }
         }
 
+        /** 关闭当前活跃 exec 通道，避免下一条命令复用脏状态。 */
         private void closeActiveExec() {
             ChannelExec execChannel = activeExecChannel;
             activeExecChannel = null;
@@ -318,6 +346,7 @@ public class BotSshSessionManager {
         this.aiCliExecutor = aiCliExecutor;
     }
 
+    /** 应用关闭时统一释放 SSH 连接和输出线程池。 */
     @PreDestroy
     public void shutdown() {
         connections.values().forEach(SshConnection::close);
@@ -329,6 +358,7 @@ public class BotSshSessionManager {
         return botType + ":" + userId;
     }
 
+    /** 获取连接级重连锁对象，确保同一连接只会被一个线程执行重连。 */
     private Object reconnectLock(String key) {
         return reconnectLocks.computeIfAbsent(key, ignored -> new Object());
     }
@@ -347,6 +377,7 @@ public class BotSshSessionManager {
     public void disconnect(String botType, String userId) {
         String key = connectionKey(botType, userId);
         SshConnection conn = connections.remove(key);
+        // SSH 断开时同步清理 AI 会话，避免续聊上下文污染其他连接。
         aiCliExecutor.clearAllSessions(botType + ":" + userId);
         if (conn != null) {
             conn.close();
@@ -363,6 +394,7 @@ public class BotSshSessionManager {
                 toRemove.add(key);
                 conn.close();
                 String userKey = key.substring(botType.length() + 1);
+                // key 形如 botType:userId，这里恢复成 userKey 以清理对应 AI 会话。
                 aiCliExecutor.clearAllSessions(botType + ":" + userKey);
                 reconnectContexts.remove(key);
                 reconnectLocks.remove(key);
@@ -412,7 +444,7 @@ public class BotSshSessionManager {
             throw new IllegalArgumentException("未找到匹配的会话: " + target);
         }
 
-        // 获取完整凭据
+        // 获取完整凭据（列表接口不含敏感字段，连接前需要拉取详情）。
         SshSessionProfile detail = profileStore.get(sshUsername, matched.getId());
         if (detail == null) {
             throw new IllegalStateException("无法获取会话详情: " + matched.getName());
@@ -459,6 +491,7 @@ public class BotSshSessionManager {
                     future.complete("(无输出)");
                     return;
                 }
+                // 去掉 ANSI 控制符，避免聊天平台出现乱码控制字符。
                 future.complete(stripAnsiCodes(output));
             } catch (IOException e) {
                 future.completeExceptionally(new IllegalStateException(e.getMessage(), e));
@@ -483,6 +516,7 @@ public class BotSshSessionManager {
                 return conn.startRemoteCommand(command);
             } catch (IOException e) {
                 lastError = e;
+                // 通道层异常通常意味着连接已坏，失效后下一轮尝试自动重连。
                 log.warn("启动远端命令失败，准备重试 [{}][attempt={}]: {}", key, attempt, e.getMessage());
                 invalidateConnection(key, conn);
             }
@@ -524,6 +558,7 @@ public class BotSshSessionManager {
             config.put("PreferredAuthentications",
                     "PASSWORD".equalsIgnoreCase(spec.authType()) ? "password" : "publickey");
             if (sshProperties.isAllowLegacySshRsa()) {
+                // 兼容旧主机仅支持 ssh-rsa 的场景。
                 String hostKeyAlgos = sshSession.getConfig("server_host_key");
                 if (hostKeyAlgos != null && !hostKeyAlgos.contains("ssh-rsa")) {
                     config.put("server_host_key", hostKeyAlgos + ",ssh-rsa");
@@ -550,6 +585,7 @@ public class BotSshSessionManager {
             if (restoreCwd != null && !restoreCwd.isBlank()) {
                 conn.cwd = restoreCwd;
             }
+            // 触发一次轻量命令，确保 cwd 与远端环境同步。
             conn.sendCommand("printf '%s' \"$PWD\"");
             conn.readAvailableOutput(50, 500);
 
@@ -565,9 +601,16 @@ public class BotSshSessionManager {
         }
     }
 
+    /** exec 输出解析结果：可见文本 + 命令结束后的 cwd。 */
     private record ExecResult(String output, String cwd) {
     }
 
+    /**
+     * 构建远端执行脚本。
+     * <p>
+     * 通过隐藏标记输出执行后 cwd，便于本地状态同步。
+     * </p>
+     */
     private static String buildExecCommand(String command, String cwd) {
         StringBuilder script = new StringBuilder();
         if (cwd != null && !cwd.isBlank()) {
@@ -582,6 +625,12 @@ public class BotSshSessionManager {
         return script.toString();
     }
 
+    /**
+     * 解析 exec 原始字节流。
+     * <p>
+     * 从尾部标记中提取 cwd，并移除控制标记后返回可见输出文本。
+     * </p>
+     */
     private static ExecResult parseExecResult(byte[] raw) {
         if (raw == null || raw.length == 0) {
             return new ExecResult("", null);
@@ -608,6 +657,7 @@ public class BotSshSessionManager {
         return new ExecResult(visible.toString(StandardCharsets.UTF_8), cwd);
     }
 
+    /** 在字节数组中从指定位置向后查找某个字节。 */
     private static int indexOf(byte[] data, byte value, int from) {
         for (int i = Math.max(from, 0); i < data.length; i++) {
             if (data[i] == value) {
@@ -617,6 +667,7 @@ public class BotSshSessionManager {
         return -1;
     }
 
+    /** 在字节数组中从尾到头查找某个字节。 */
     private static int lastIndexOf(byte[] data, byte value) {
         for (int i = data.length - 1; i >= 0; i--) {
             if (data[i] == value) {
@@ -626,6 +677,7 @@ public class BotSshSessionManager {
         return -1;
     }
 
+    /** 判断 data[from...] 是否以 prefix 开头。 */
     private static boolean startsWith(byte[] data, int from, byte[] prefix) {
         if (from < 0 || from + prefix.length > data.length) {
             return false;
@@ -667,6 +719,7 @@ public class BotSshSessionManager {
         }
     }
 
+    /** 读取连接并检查可用性；不可用时自动失效清理。 */
     private SshConnection findActiveConnection(String key) {
         SshConnection conn = connections.get(key);
         if (conn == null) {
@@ -682,6 +735,7 @@ public class BotSshSessionManager {
         return null;
     }
 
+    /** 失效并关闭指定连接对象。 */
     private void invalidateConnection(String key, SshConnection conn) {
         if (conn == null) {
             return;
@@ -690,6 +744,11 @@ public class BotSshSessionManager {
         conn.close();
     }
 
+    /**
+     * 确保连接可用，不可用时尝试自动重连。
+     *
+     * @return 可用连接；若无重连上下文或重连失败则返回 null
+     */
     private SshConnection ensureConnection(String botType, String userId) {
         String key = connectionKey(botType, userId);
         SshConnection conn = findActiveConnection(key);
@@ -723,6 +782,7 @@ public class BotSshSessionManager {
         }
     }
 
+    /** 发送命令并在失败时重试一次（含自动重连）。 */
     private SshConnection sendCommandWithReconnect(String botType, String userId, String command) throws IOException {
         String key = connectionKey(botType, userId);
         IOException lastError = null;
@@ -744,6 +804,7 @@ public class BotSshSessionManager {
                 lastError);
     }
 
+    /** shell 单引号转义。 */
     private static String shellQuote(String value) {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }

@@ -55,13 +55,21 @@ public class QqOfficialBotProvider implements ChatBotProvider {
 
     private static final Logger log = LoggerFactory.getLogger(QqOfficialBotProvider.class);
     private static final String TYPE = "qq-official";
+    /** QQ 机器人鉴权域名（获取 access_token）。 */
     private static final String TOKEN_DOMAIN = "https://bots.qq.com";
+    /** QQ 机器人开放平台 API 域名。 */
     private static final String API_DOMAIN = "https://api.sgroup.qq.com";
+    /** C2C 私聊事件 intent 位掩码。 */
     private static final int C2C_INTENT = 1 << 25;
+    /** 网关重连默认等待时长。 */
     private static final long DEFAULT_RECONNECT_DELAY_MS = 3_000L;
+    /** 去重窗口大小，避免消息重复消费。 */
     private static final int MAX_RECENT_EVENT_IDS = 256;
+    /** QQ 私聊单条消息最大长度（保守值）。 */
     private static final int MAX_PRIVATE_MESSAGE_LENGTH = 1500;
+    /** AI 输出聚合后定时刷新间隔。 */
     private static final long AI_STREAM_FLUSH_INTERVAL_MS = 2_500L;
+    /** AI 输出达到阈值后立即推送。 */
     private static final int AI_STREAM_BATCH_THRESHOLD = 700;
     private static final Pattern MARKDOWN_HEADING = Pattern.compile("^(#{1,6})\\s+(.+?)\\s*$");
     private static final Pattern MARKDOWN_BULLET = Pattern.compile("^\\s*[-*+]\\s+");
@@ -77,17 +85,21 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
     private final WebSocketContainer webSocketContainer;
+    /** 心跳与重连调度器（单线程保证顺序）。 */
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "qq-bot-scheduler");
         t.setDaemon(true);
         return t;
     });
+    /** 事件处理线程池，避免 Gateway IO 线程被业务逻辑阻塞。 */
     private final ExecutorService eventExecutor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "qq-bot-event");
         t.setDaemon(true);
         return t;
     });
+    /** 最近事件 ID 去重集合。 */
     private final Set<String> recentEventIds = ConcurrentHashMap.newKeySet();
+    /** 最近事件 ID 顺序队列，用于控制去重窗口大小。 */
     private final ConcurrentLinkedDeque<String> recentEventOrder = new ConcurrentLinkedDeque<>();
 
     private volatile ProviderConfig currentConfig;
@@ -104,18 +116,23 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     private volatile String gatewayStage = "未连接";
     private volatile Instant gatewayConnectedAt = Instant.EPOCH;
 
+    /** Provider 启动配置快照。 */
     record ProviderConfig(String appId, String appSecret, String sshUsername, Set<String> allowedUserIds) {
     }
 
+    /** access_token 及过期时长。 */
     record AccessTokenInfo(String accessToken, long expiresInSeconds) {
     }
 
+    /** QQ Gateway 地址信息。 */
     record GatewayInfo(String url) {
     }
 
+    /** 入站 C2C 消息抽象。 */
     record IncomingC2cMessage(String eventId, String messageId, String userOpenId, String content) {
     }
 
+    /** 解析后的命令结构。 */
     record CommandInput(String command, String argument) {
     }
 
@@ -143,6 +160,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     public synchronized void start(BotSettings settings) throws Exception {
         stop();
 
+        // 重置运行态并加载配置，防止复用上次连接状态。
         ProviderConfig config = parseSettings(settings);
         this.currentConfig = config;
         this.stopRequested = false;
@@ -154,6 +172,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         this.gatewayConnectedAt = Instant.EPOCH;
 
         try {
+            // 启动阶段先拿 token 再连网关，失败时可快速暴露配置问题。
             ensureAccessToken(config, true);
             connectGateway(config);
         } catch (Exception e) {
@@ -170,6 +189,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     public synchronized void stop() {
         stopRequested = true;
         running = false;
+        // 先停定时任务，再关网关连接，避免关停过程又触发重连。
         cancelHeartbeat();
         cancelReconnect();
         closeWebSocket();
@@ -185,6 +205,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         statusMessage = "已停止";
     }
 
+    /** JVM 关闭时清理线程池与网络连接。 */
     @PreDestroy
     public void destroy() {
         stop();
@@ -202,6 +223,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return statusMessage;
     }
 
+    /** 将通用 BotSettings 转换为 QQ Provider 专用配置。 */
     static ProviderConfig parseSettings(BotSettings settings) {
         if (settings == null) {
             throw new IllegalArgumentException("机器人配置不能为空");
@@ -233,6 +255,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 allowedUserIds);
     }
 
+    /** 规范化入站消息文本（统一空格并去首尾空白）。 */
     static String normalizeIncomingContent(String rawContent) {
         if (rawContent == null) {
             return "";
@@ -240,6 +263,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return rawContent.replace('\u2005', ' ').trim();
     }
 
+    /** 检查当前用户是否在白名单中；未配置白名单时默认放行。 */
     static boolean isUserAllowed(Set<String> allowedUserIds, String userOpenId) {
         if (allowedUserIds == null || allowedUserIds.isEmpty()) {
             return true;
@@ -247,6 +271,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return userOpenId != null && allowedUserIds.contains(userOpenId);
     }
 
+    /** 解析命令与参数，命令统一转小写。 */
     static CommandInput parseCommandInput(String text) {
         if (text == null || text.isBlank()) {
             return new CommandInput("", "");
@@ -255,6 +280,12 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return new CommandInput(parts[0].toLowerCase(), parts.length > 1 ? parts[1].trim() : "");
     }
 
+    /**
+     * 处理收到的私聊消息。
+     * <p>
+     * / 前缀走命令路由，普通文本按 Shell 命令执行。
+     * </p>
+     */
     void processIncomingMessage(IncomingC2cMessage message, ProviderConfig config, ReplySender sender) {
         if (message == null || config == null) {
             return;
@@ -276,6 +307,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 命令分发中心。 */
     private void handleCommand(IncomingC2cMessage message, ProviderConfig config, ReplySender sender,
             CommandInput input) {
         switch (input.command()) {
@@ -296,6 +328,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** /connect 命令处理。 */
     private void handleConnect(IncomingC2cMessage message, ProviderConfig config, ReplySender sender, String target) {
         if (target == null || target.isBlank()) {
             sender.passiveReply(message, "用法: /connect <会话名称或序号>\n例如: /connect 1");
@@ -310,6 +343,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** /disconnect 命令处理。 */
     private void handleDisconnect(IncomingC2cMessage message, ReplySender sender) {
         BotInteractionService.DisconnectResult result = interactionService.disconnect(TYPE, message.userOpenId());
         if (!result.disconnected()) {
@@ -319,6 +353,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         sender.passiveReply(message, "🔌 已断开与 " + result.profileName() + " 的连接。");
     }
 
+    /** /status 命令处理。 */
     private void handleStatus(IncomingC2cMessage message, ReplySender sender) {
         BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, message.userOpenId());
         if (!status.connected()) {
@@ -334,6 +369,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         sender.passiveReply(message, sb.toString());
     }
 
+    /** 普通文本按 Shell 命令执行。 */
     private void handleShellInput(IncomingC2cMessage message, ReplySender sender, String command) {
         BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE,
                 message.userOpenId());
@@ -352,6 +388,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 });
     }
 
+    /** 启动 AI 任务并使用缓冲发布器分段推送输出。 */
     private void handleAiStart(IncomingC2cMessage message, ReplySender sender, String prompt,
             AiCliExecutor.CliType cliType) {
         String cmdName = cliType.name().toLowerCase();
@@ -388,6 +425,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         sender.passiveReply(message, sb.toString());
     }
 
+    /** 停止 AI 任务。 */
     private void handleAiStop(IncomingC2cMessage message, ReplySender sender, AiCliExecutor.CliType cliType) {
         if (interactionService.stopAiTask(TYPE, message.userOpenId(), cliType)) {
             sender.passiveReply(message, "🛑 " + cliType.getDisplayName() + " 任务已停止。");
@@ -396,17 +434,20 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 查询 AI 任务状态与最近输出。 */
     private void handleAiStatus(IncomingC2cMessage message, ReplySender sender, AiCliExecutor.CliType cliType) {
         BotInteractionService.AiTaskSnapshot snapshot = interactionService.getAiTaskSnapshot(TYPE, message.userOpenId(),
                 cliType);
         sender.passiveReply(message, buildAiSummary(cliType, snapshot, true));
     }
 
+    /** 清理 AI 会话 ID。 */
     private void handleAiClear(IncomingC2cMessage message, ReplySender sender, AiCliExecutor.CliType cliType) {
         interactionService.clearAiSession(TYPE, message.userOpenId(), cliType);
         sender.passiveReply(message, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
     }
 
+    /** 机器人帮助文案。 */
     private String buildHelpText() {
         return """
                 WebSSH QQ 私聊机器人
@@ -431,6 +472,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 连接 SSH 后，直接发送文字即可执行 Shell 命令。""";
     }
 
+    /** 生成 SSH 会话列表文本。 */
     private String buildProfileListText(String sshUsername) {
         List<SshSessionProfile> profiles = interactionService.listProfiles(sshUsername);
         if (profiles.isEmpty()) {
@@ -457,6 +499,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return sb.toString();
     }
 
+    /** 组装 AI 状态摘要。 */
     private String buildAiSummary(AiCliExecutor.CliType cliType, BotInteractionService.AiTaskSnapshot snapshot,
             boolean includeIdleHint) {
         if (snapshot == null || (!snapshot.running() && !snapshot.hasOutput())) {
@@ -482,6 +525,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return sb.toString();
     }
 
+    /** 建立 Gateway WebSocket 连接。 */
     private void connectGateway(ProviderConfig config) throws Exception {
         GatewayInfo gatewayInfo = fetchGatewayInfo(config);
         closeWebSocket();
@@ -492,6 +536,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 URI.create(gatewayInfo.url()));
     }
 
+    /** 计划一次延迟重连，避免连续失败时频繁重试。 */
     private synchronized void scheduleReconnect(String reason) {
         if (stopRequested || currentConfig == null) {
             return;
@@ -517,6 +562,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }, DEFAULT_RECONNECT_DELAY_MS, TimeUnit.MILLISECONDS);
     }
 
+    /** 取消待执行重连任务。 */
     private void cancelReconnect() {
         if (reconnectFuture != null) {
             reconnectFuture.cancel(true);
@@ -524,6 +570,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 取消心跳任务。 */
     private void cancelHeartbeat() {
         if (heartbeatFuture != null) {
             heartbeatFuture.cancel(true);
@@ -531,6 +578,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 安全关闭当前网关连接。 */
     private void closeWebSocket() {
         Session session = this.gatewaySession;
         this.gatewaySession = null;
@@ -544,6 +592,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 发送 Identify 鉴权包。 */
     private void sendIdentify() throws Exception {
         ProviderConfig config = currentConfig;
         if (config == null) {
@@ -561,10 +610,12 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         sendGatewayPayload(Map.of("op", 2, "d", data));
     }
 
+    /** 发送心跳包，d 字段为最近序列号。 */
     private void sendHeartbeat() {
         sendGatewayPayload(Map.of("op", 1, "d", lastSeq <= 0 ? null : lastSeq));
     }
 
+    /** 发送 Gateway 协议包。 */
     private void sendGatewayPayload(Object payload) {
         try {
             Session session = this.gatewaySession;
@@ -585,6 +636,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 网关消息总入口。根据 op 分发到各处理分支。 */
     private void handleGatewayMessage(String message) {
         try {
             JsonNode root = objectMapper.readTree(message);
@@ -607,6 +659,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 处理 HELLO：启动心跳并发送 Identify。 */
     private void handleHello(JsonNode data) throws Exception {
         long intervalMs = data.path("heartbeat_interval").asLong(45_000L);
         cancelHeartbeat();
@@ -618,6 +671,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         sendIdentify();
     }
 
+    /** 处理 DISPATCH 事件（READY/C2C_MESSAGE_CREATE）。 */
     private void handleDispatch(JsonNode root) {
         String type = root.path("t").asText("");
         if ("READY".equals(type)) {
@@ -647,6 +701,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         eventExecutor.submit(() -> processIncomingMessage(event, config, new HttpReplySender()));
     }
 
+    /** 解析 C2C_MESSAGE_CREATE payload。 */
     IncomingC2cMessage parseIncomingC2cMessage(String eventId, JsonNode data) {
         if (data == null || data.isMissingNode()) {
             return null;
@@ -668,6 +723,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 content);
     }
 
+    /** 基于事件 ID 做短窗口去重，避免重连后重复消费。 */
     private boolean isDuplicateEvent(IncomingC2cMessage event) {
         String key = event.eventId();
         if (key == null || key.isBlank()) {
@@ -686,11 +742,13 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return false;
     }
 
+    /** 清空去重缓存。 */
     private void clearRecentEvents() {
         recentEventIds.clear();
         recentEventOrder.clear();
     }
 
+    /** 获取可用 access_token；未过期则复用，过期前 30 秒内提前刷新。 */
     private String ensureAccessToken(ProviderConfig config, boolean forceRefresh) throws Exception {
         if (!forceRefresh && accessToken != null && Instant.now().isBefore(accessTokenExpiry.minusSeconds(30))) {
             return accessToken;
@@ -702,6 +760,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return accessToken;
     }
 
+    /** 调用 QQ 接口获取 access_token。 */
     private AccessTokenInfo fetchAccessToken(String appId, String appSecret) throws Exception {
         Map<String, String> body = Map.of(
                 "appId", appId,
@@ -715,6 +774,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return parseAccessTokenResponse(response.statusCode(), response.body());
     }
 
+    /** 解析 access_token 响应并在失败时抛出可读错误。 */
     static AccessTokenInfo parseAccessTokenResponse(int statusCode, String responseBody) throws Exception {
         JsonNode json = new ObjectMapper().readTree(responseBody);
         String token = trimToNull(json.path("access_token").asText(""));
@@ -726,11 +786,12 @@ public class QqOfficialBotProvider implements ChatBotProvider {
 
         String message = trimToNull(json.path("message").asText(""));
         if (message == null) {
-            message = responseBody;
+        message = responseBody;
         }
         throw new IllegalStateException("获取 QQ access_token 失败: " + message);
     }
 
+    /** 拉取 QQ Gateway 地址。 */
     private GatewayInfo fetchGatewayInfo(ProviderConfig config) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(API_DOMAIN + "/gateway"))
                 .timeout(Duration.ofSeconds(10))
@@ -741,6 +802,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return parseGatewayResponse(response.statusCode(), response.body());
     }
 
+    /** 解析 Gateway 响应。 */
     static GatewayInfo parseGatewayResponse(int statusCode, String responseBody) throws Exception {
         JsonNode json = new ObjectMapper().readTree(responseBody);
         if (statusCode < 200 || statusCode >= 300) {
@@ -753,6 +815,11 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return new GatewayInfo(url);
     }
 
+    /**
+     * 发送 C2C 私聊消息。
+     *
+     * @param active true 为主动消息（无 msg_id）；false 为被动回复（带原消息 msg_id）
+     */
     private void sendC2cMessage(String userOpenId, String content, String msgId, boolean active) throws Exception {
         ProviderConfig config = currentConfig;
         if (config == null) {
@@ -781,11 +848,13 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 生成 msg_seq，降低重复发送时的冲突概率。 */
     private int nextMsgSeq(String messageId) {
         int mixed = (int) (System.currentTimeMillis() ^ messageId.hashCode() ^ ThreadLocalRandom.current().nextInt());
         return Math.floorMod(mixed, 65_536);
     }
 
+    /** 单条消息截断到 QQ 可接受长度。 */
     static String truncateForQq(String text) {
         String normalized = normalizeForQq(text);
         if (normalized.isBlank()) {
@@ -801,10 +870,12 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return normalized.substring(0, cut).trim() + "\n...(输出过长，已截断)";
     }
 
+    /** 当前保留简单文本返回，不再额外包裹代码块语法。 */
     private String wrapQqCodeBlock(String text) {
         return truncateForQq(text);
     }
 
+    /** 将长文本拆分为多条私聊消息。 */
     private List<String> splitForQq(String text) {
         String normalized = normalizeForQq(text);
         if (normalized.isBlank()) {
@@ -838,6 +909,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return parts;
     }
 
+    /** 将 Markdown 富文本规范化为 QQ 私聊更易读的纯文本。 */
     static String normalizeForQq(String text) {
         if (text == null || text.isBlank()) {
             return "";
@@ -876,6 +948,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return EXTRA_BLANK_LINES.matcher(sb.toString().trim()).replaceAll("\n\n");
     }
 
+    /** 粗略判断文本是否可能为 Markdown。 */
     private static boolean looksLikeMarkdown(String text) {
         if (text == null || text.isBlank()) {
             return false;
@@ -886,6 +959,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 || MARKDOWN_MULTI_HASH_HEADING.matcher(text).find();
     }
 
+    /** 处理行内 Markdown 元素（链接、粗体、行内代码）。 */
     private static String formatInlineMarkdown(String text) {
         if (text == null || text.isBlank()) {
             return "";
@@ -898,6 +972,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return formatted;
     }
 
+    /** 格式化 Markdown 链接/图片语法。 */
     private static String formatMarkdownLink(String fullMatch, String label, String target) {
         if (fullMatch != null && fullMatch.startsWith("!")) {
             return "图片: " + label + " " + target;
@@ -905,10 +980,12 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return label + ": " + target;
     }
 
+    /** 空值保护，避免日志/提示中出现 null。 */
     private static String safe(String text) {
         return text == null ? "" : text;
     }
 
+    /** trim 后为空则返回 null。 */
     private static String trimToNull(String text) {
         if (text == null) {
             return null;
@@ -917,6 +994,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    /** 描述当前网关连接已持续时间。 */
     private String describeConnectionAge() {
         if (gatewayConnectedAt == null || gatewayConnectedAt.equals(Instant.EPOCH)) {
             return "未知";
@@ -925,12 +1003,19 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return seconds + "s";
     }
 
+    /** 回复抽象：被动回复（引用消息）与主动推送。 */
     interface ReplySender {
         void passiveReply(IncomingC2cMessage message, String text);
 
         void activeReply(String userOpenId, String text);
     }
 
+    /**
+     * AI 输出缓冲发布器。
+     * <p>
+     * 将高频碎片输出聚合后再发送，避免 QQ 频率限制和刷屏。
+     * </p>
+     */
     private final class BufferedAiReplyPublisher {
         private final IncomingC2cMessage message;
         private final ReplySender sender;
@@ -956,6 +1041,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             pending.append(chunk.trim());
 
             if (pending.length() >= AI_STREAM_BATCH_THRESHOLD) {
+                // 达到阈值立即发送，减少用户等待。
                 flushPending(false);
                 cancelScheduledFlush();
             } else if (flushFuture == null || flushFuture.isDone()) {
@@ -990,6 +1076,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             sender.activeReply(message.userOpenId(), text);
         }
 
+        /** 取消尚未触发的定时 flush。 */
         private void cancelScheduledFlush() {
             if (flushFuture != null) {
                 flushFuture.cancel(false);
@@ -997,6 +1084,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             }
         }
 
+        /** 发送当前缓冲内容。 */
         private void flushPending(boolean allowEmpty) {
             String text = pending.toString().trim();
             pending.setLength(0);
@@ -1010,6 +1098,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** 基于 HTTP API 的回复实现。 */
     private class HttpReplySender implements ReplySender {
         @Override
         public void passiveReply(IncomingC2cMessage message, String text) {
@@ -1030,6 +1119,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         }
     }
 
+    /** Gateway WebSocket 生命周期处理器。 */
     private class GatewayEndpoint extends Endpoint {
         @Override
         public void onOpen(Session session, EndpointConfig config) {

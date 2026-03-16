@@ -28,6 +28,7 @@ public class AuthController {
      */
     @GetMapping("/api/auth/me")
     public Map<String, String> me(Principal principal) {
+        // 该接口由认证过滤链保护，走到这里时 principal 理论上一定非空。
         return Map.of("username", principal.getName());
     }
 }

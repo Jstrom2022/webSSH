@@ -71,17 +71,25 @@ public class AiCliExecutor {
     /** 用户的会话 ID，key = cliType:botType:userId */
     private final ConcurrentMap<String, String> userSessionIds = new ConcurrentHashMap<>();
 
+    /**
+     * 远端命令启动器抽象。
+     * <p>
+     * 由调用方注入具体的 SSH exec 启动实现，使当前类仅关注命令构建与事件解析。
+     * </p>
+     */
     @FunctionalInterface
     public interface RemoteCommandStarter {
         BotSshSessionManager.RemoteCommandHandle start(String command) throws Exception;
     }
 
+    /** AI 任务执行线程池，避免阻塞机器人消息处理线程。 */
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "ai-cli-exec");
         t.setDaemon(true);
         return t;
     });
 
+    /** 应用销毁前关闭所有任务并回收线程。 */
     @PreDestroy
     public void shutdown() {
         runningProcesses.values().forEach(Process::destroyForcibly);
@@ -166,6 +174,14 @@ public class AiCliExecutor {
 
     /**
      * 通过已建立的 SSH 会话执行 AI CLI 任务。
+     *
+     * @param cliType        AI 工具类型
+     * @param userKey        用户唯一标识（botType:userId）
+     * @param prompt         用户提示词
+     * @param workDir        工作目录（可为 null）
+     * @param remoteStarter  远端命令启动器
+     * @param outputCallback 输出回调
+     * @param onComplete     任务结束回调
      */
     public void executeRemote(CliType cliType, String userKey, String prompt, String workDir,
             RemoteCommandStarter remoteStarter,
@@ -301,10 +317,12 @@ public class AiCliExecutor {
         return false;
     }
 
+    /** 生成统一任务键，作为进程表和会话表的索引。 */
     private String processKey(CliType cliType, String userKey) {
         return cliType.name() + ":" + userKey;
     }
 
+    /** 判断任务键是否属于指定 botType，用于批量停止与清理。 */
     private boolean belongsToBotType(String processKey, String botType) {
         String prefix = ":" + botType + ":";
         return processKey != null && processKey.contains(prefix);
@@ -312,6 +330,7 @@ public class AiCliExecutor {
 
     // ==================== 命令构建 ====================
 
+    /** 构建本地执行命令，并尽量复用历史 sessionId 延续上下文。 */
     private List<String> buildCommand(CliType cliType, String prompt, String workDir, String processKey) {
         String sessionId = userSessionIds.get(processKey);
         return switch (cliType) {
@@ -320,6 +339,12 @@ public class AiCliExecutor {
         };
     }
 
+    /**
+     * 构建远端执行命令字符串。
+     * <p>
+     * 首先注入“查找 CLI 二进制”的脚本，然后拼接参数并做 shell 转义。
+     * </p>
+     */
     private String buildRemoteCommand(CliType cliType, String prompt, String workDir, String processKey) {
         List<String> args = new ArrayList<>(buildCommand(cliType, prompt, workDir, processKey));
         if (!args.isEmpty()) {
@@ -334,6 +359,12 @@ public class AiCliExecutor {
         return sb.toString();
     }
 
+    /**
+     * 生成远端 CLI 路径探测脚本。
+     * <p>
+     * 按 command -v、固定路径、用户常见 bin 路径、nvm 路径依次探测；失败返回 127。
+     * </p>
+     */
     private String buildRemoteBinResolveScript(CliType cliType, String commandName) {
         String[] candidates = switch (cliType) {
             case CODEX -> new String[] {
@@ -382,6 +413,7 @@ public class AiCliExecutor {
         return sb.toString();
     }
 
+    /** 构建 Codex CLI 命令参数。 */
     private List<String> buildCodexCommand(String prompt, String workDir, String sessionId) {
         List<String> cmd = new ArrayList<>();
         cmd.add(CliType.CODEX.getDefaultBin());
@@ -405,6 +437,7 @@ public class AiCliExecutor {
         return cmd;
     }
 
+    /** 构建 Claude Code 命令参数。 */
     private List<String> buildClaudeCommand(String prompt, String workDir, String sessionId) {
         List<String> cmd = new ArrayList<>();
         cmd.add(CliType.CLAUDE.getDefaultBin());
@@ -423,10 +456,12 @@ public class AiCliExecutor {
         return cmd;
     }
 
+    /** 进行 shell 单引号转义，避免命令拼接时参数被拆分。 */
     private static String shellQuote(String value) {
         return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
+    /** 清理远端原始输出中的控制字符与 cwd 标记，只保留可读文本。 */
     private String sanitizeRemoteRawLine(String line) {
         if (line == null) {
             return "";
@@ -444,6 +479,11 @@ public class AiCliExecutor {
 
     // ==================== 输出解析 ====================
 
+    /**
+     * 尝试解析一行 JSON 事件。
+     *
+     * @return true 表示该行已按事件处理；false 表示应按普通文本回显
+     */
     private boolean processLine(CliType cliType, String userKey, String line, Consumer<String> callback) {
         if (line == null || line.isBlank()) {
             return false;
@@ -486,6 +526,7 @@ public class AiCliExecutor {
                     String itemType = item.path("type").asText("");
                     String text = item.path("text").asText("");
                     if (!text.isBlank()) {
+                        // item.completed 是最终可展示内容，按语义打前缀便于聊天界面快速区分。
                         String prefix = switch (itemType) {
                             case "agent_message" -> "🤖 ";
                             case "tool_call" -> "🔧 ";
@@ -495,6 +536,7 @@ public class AiCliExecutor {
                     }
                 }
                 case "turn.completed" -> {
+                    // turn 完成时附带 token 用量，便于用户了解一次请求消耗。
                     JsonNode usage = node.path("usage");
                     if (!usage.isMissingNode()) {
                         int input = usage.path("input_tokens").asInt(0);
@@ -545,6 +587,7 @@ public class AiCliExecutor {
                     }
                 }
                 case "result" -> {
+                    // result 事件通常代表一轮输出结束，优先同步会话 ID 便于续聊。
                     String sid = node.path("session_id").asText("");
                     if (!sid.isBlank()) {
                         userSessionIds.put(processKey, sid);
@@ -580,6 +623,7 @@ public class AiCliExecutor {
         };
     }
 
+    /** 对长字符串做安全截断，避免消息输出过长。 */
     private String truncate(String text, int maxLen) {
         return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
     }
