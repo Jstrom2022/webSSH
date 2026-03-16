@@ -13,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -59,6 +60,19 @@ class BotSshSessionManagerTest {
         assertEquals("uid=0(root)\n", output);
         assertEquals("id\n", recoveredConnection.writtenCommand());
         assertTrue(staleConnection.wasClosed());
+    }
+
+    @Test
+    void shouldInjectUtf8LocaleWhenBuildingExecCommand() throws Exception {
+        Method method = BotSshSessionManager.class.getDeclaredMethod("buildExecCommand", String.class, String.class);
+        method.setAccessible(true);
+
+        String script = (String) method.invoke(null, "ls -la", "/tmp");
+
+        assertTrue(script.startsWith("case \"${LC_ALL:-${LC_CTYPE:-$LANG}}\" in"));
+        assertTrue(script.contains("export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LC_CTYPE=en_US.UTF-8"));
+        assertTrue(script.contains("cd -- '/tmp'"));
+        assertTrue(script.contains("__webssh_cmd='ls -la'"));
     }
 
     private SshSessionProfile createProfile() {

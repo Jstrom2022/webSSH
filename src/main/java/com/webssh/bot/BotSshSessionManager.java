@@ -57,6 +57,15 @@ public class BotSshSessionManager {
     private static final byte SHELL_CWD_MARKER_START = 0x02;
     private static final byte SHELL_CWD_MARKER_END = 0x03;
     private static final byte[] SHELL_CWD_MARKER_PREFIX = "__WEBSSH_CWD__:".getBytes(StandardCharsets.US_ASCII);
+    /** 当远端未提供 UTF-8 locale 时，默认兜底值。 */
+    private static final String DEFAULT_SHELL_UTF8_LOCALE = "en_US.UTF-8";
+    /** 命令执行前的 UTF-8 locale 兜底脚本，减少中文文件名显示为问号。 */
+    private static final String UTF8_LOCALE_BOOTSTRAP_SCRIPT =
+            "case \"${LC_ALL:-${LC_CTYPE:-$LANG}}\" in *[Uu][Tt][Ff]-8*) ;; *) "
+                    + "export LANG=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " LC_ALL=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " LC_CTYPE=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " ;; esac; ";
 
     /** 读取 SSH 会话配置与凭据。 */
     private final SessionProfileStore profileStore;
@@ -232,6 +241,7 @@ public class BotSshSessionManager {
                 ChannelExec execChannel = (ChannelExec) session.openChannel("exec");
                 execChannel.setPty(true);
                 execChannel.setPtyType("xterm-256color");
+                BotSshSessionManager.trySetExecUtf8Locale(execChannel);
                 execChannel.setCommand(BotSshSessionManager.buildExecCommand(command, getCwd()));
                 InputStream execOutput = execChannel.getInputStream();
                 execChannel.connect(5_000);
@@ -252,6 +262,7 @@ public class BotSshSessionManager {
                 ChannelExec execChannel = (ChannelExec) session.openChannel("exec");
                 execChannel.setPty(true);
                 execChannel.setPtyType("xterm-256color");
+                BotSshSessionManager.trySetExecUtf8Locale(execChannel);
                 execChannel.setCommand(BotSshSessionManager.buildExecCommand(command, getCwd()));
                 InputStream execOutput = execChannel.getInputStream();
                 execChannel.connect(5_000);
@@ -613,6 +624,7 @@ public class BotSshSessionManager {
      */
     private static String buildExecCommand(String command, String cwd) {
         StringBuilder script = new StringBuilder();
+        script.append(UTF8_LOCALE_BOOTSTRAP_SCRIPT);
         if (cwd != null && !cwd.isBlank()) {
             script.append("if [ -d ").append(shellQuote(cwd)).append(" ]; then cd -- ")
                     .append(shellQuote(cwd)).append("; fi; ");
@@ -807,5 +819,15 @@ public class BotSshSessionManager {
     /** shell 单引号转义。 */
     private static String shellQuote(String value) {
         return "'" + value.replace("'", "'\"'\"'") + "'";
+    }
+
+    /** 为 exec 通道注入 UTF-8 locale；若服务端忽略 env，仍由脚本级兜底保障。 */
+    private static void trySetExecUtf8Locale(ChannelExec execChannel) {
+        if (execChannel == null) {
+            return;
+        }
+        execChannel.setEnv("LANG", DEFAULT_SHELL_UTF8_LOCALE);
+        execChannel.setEnv("LC_ALL", DEFAULT_SHELL_UTF8_LOCALE);
+        execChannel.setEnv("LC_CTYPE", DEFAULT_SHELL_UTF8_LOCALE);
     }
 }

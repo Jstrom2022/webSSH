@@ -32,6 +32,15 @@ public class AiCliExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(AiCliExecutor.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** 当远端未提供 UTF-8 locale 时，默认兜底值。 */
+    private static final String DEFAULT_SHELL_UTF8_LOCALE = "en_US.UTF-8";
+    /** 远端命令执行前强制 UTF-8 locale 的脚本。 */
+    private static final String UTF8_LOCALE_BOOTSTRAP_SCRIPT =
+            "case \"${LC_ALL:-${LC_CTYPE:-$LANG}}\" in *[Uu][Tt][Ff]-8*) ;; *) "
+                    + "export LANG=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " LC_ALL=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " LC_CTYPE=" + DEFAULT_SHELL_UTF8_LOCALE
+                    + " ;; esac; ";
 
     /**
      * 支持的 AI CLI 工具类型。
@@ -351,6 +360,7 @@ public class AiCliExecutor {
             args.remove(0);
         }
         StringBuilder sb = new StringBuilder();
+        sb.append(UTF8_LOCALE_BOOTSTRAP_SCRIPT);
         sb.append(buildRemoteBinResolveScript(cliType, cliType.getCommandName()));
         sb.append("\"$__webssh_ai_bin\"");
         for (String arg : args) {
