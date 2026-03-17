@@ -300,10 +300,16 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             return;
         }
 
+        String aliasCommand = normalizeAiControlAlias(text);
+        if (aliasCommand != null) {
+            handleCommand(message, config, sender, parseCommandInput(aliasCommand));
+            return;
+        }
+
         if (text.startsWith("/")) {
             handleCommand(message, config, sender, parseCommandInput(text));
         } else {
-            handleShellInput(message, sender, text);
+            handleUserInput(message, sender, text);
         }
     }
 
@@ -316,11 +322,11 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             case "/connect" -> handleConnect(message, config, sender, input.argument());
             case "/disconnect" -> handleDisconnect(message, sender);
             case "/status" -> handleStatus(message, sender);
-            case "/codex" -> handleAiStart(message, sender, input.argument(), AiCliExecutor.CliType.CODEX);
+            case "/codex" -> handleAiModeCommand(message, sender, input.argument(), AiCliExecutor.CliType.CODEX);
             case "/codex_stop" -> handleAiStop(message, sender, AiCliExecutor.CliType.CODEX);
             case "/codex_status" -> handleAiStatus(message, sender, AiCliExecutor.CliType.CODEX);
             case "/codex_clear" -> handleAiClear(message, sender, AiCliExecutor.CliType.CODEX);
-            case "/claude" -> handleAiStart(message, sender, input.argument(), AiCliExecutor.CliType.CLAUDE);
+            case "/claude" -> handleAiModeCommand(message, sender, input.argument(), AiCliExecutor.CliType.CLAUDE);
             case "/claude_stop" -> handleAiStop(message, sender, AiCliExecutor.CliType.CLAUDE);
             case "/claude_status" -> handleAiStatus(message, sender, AiCliExecutor.CliType.CLAUDE);
             case "/claude_clear" -> handleAiClear(message, sender, AiCliExecutor.CliType.CLAUDE);
@@ -356,8 +362,13 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     /** /status 命令处理。 */
     private void handleStatus(IncomingC2cMessage message, ReplySender sender) {
         BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, message.userOpenId());
+        AiCliExecutor.CliType aiMode = interactionService.getAiMode(TYPE, message.userOpenId());
         if (!status.connected()) {
-            sender.passiveReply(message, "📊 状态: 未连接\n使用 /list 查看可用会话，/connect 连接。");
+            StringBuilder sb = new StringBuilder("📊 状态: 未连接\n使用 /list 查看可用会话，/connect 连接。");
+            if (aiMode != null) {
+                sb.append("\n🤖 AI 模式: ").append(aiMode.getDisplayName());
+            }
+            sender.passiveReply(message, sb.toString());
             return;
         }
 
@@ -365,8 +376,30 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         if (status.cwd() != null && !status.cwd().isBlank()) {
             sb.append("\n当前目录: ").append(status.cwd());
         }
-        sb.append("\n直接发送文字即可执行 Shell 命令。");
+        if (aiMode != null) {
+            String cmdName = aiMode.name().toLowerCase();
+            sb.append("\n🤖 AI 模式: ")
+                    .append(aiMode.getDisplayName())
+                    .append(" (使用 /")
+                    .append(cmdName)
+                    .append("_stop 或 /")
+                    .append(cmdName)
+                    .append("_clear 退出)");
+        } else {
+            sb.append("\n🤖 AI 模式: 未开启");
+        }
+        sb.append("\n未开启 AI 模式时，直接发送文字执行 Shell 命令。");
         sender.passiveReply(message, sb.toString());
+    }
+
+    /** 普通输入路由：AI 模式下走 AI，否则走 Shell。 */
+    private void handleUserInput(IncomingC2cMessage message, ReplySender sender, String text) {
+        AiCliExecutor.CliType aiMode = interactionService.getAiMode(TYPE, message.userOpenId());
+        if (aiMode != null) {
+            startAiTask(message, sender, text, aiMode);
+            return;
+        }
+        handleShellInput(message, sender, text);
     }
 
     /** 普通文本按 Shell 命令执行。 */
@@ -388,8 +421,22 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 });
     }
 
+    /** 进入 AI 模式；若带提示词则立即执行一次。 */
+    private void handleAiModeCommand(IncomingC2cMessage message, ReplySender sender, String prompt,
+            AiCliExecutor.CliType cliType) {
+        interactionService.enterAiMode(TYPE, message.userOpenId(), cliType);
+        String cmdName = cliType.name().toLowerCase();
+        if (prompt == null || prompt.isBlank()) {
+            sender.passiveReply(message, "🤖 已进入 " + cliType.getDisplayName() + " 模式。\n"
+                    + "后续直接发送内容将按该模式执行。\n"
+                    + "使用 /" + cmdName + "_stop 或 /" + cmdName + "_clear 退出。");
+            return;
+        }
+        startAiTask(message, sender, prompt, cliType);
+    }
+
     /** 启动 AI 任务并使用缓冲发布器分段推送输出。 */
-    private void handleAiStart(IncomingC2cMessage message, ReplySender sender, String prompt,
+    private void startAiTask(IncomingC2cMessage message, ReplySender sender, String prompt,
             AiCliExecutor.CliType cliType) {
         String cmdName = cliType.name().toLowerCase();
         if (prompt == null || prompt.isBlank()) {
@@ -427,10 +474,11 @@ public class QqOfficialBotProvider implements ChatBotProvider {
 
     /** 停止 AI 任务。 */
     private void handleAiStop(IncomingC2cMessage message, ReplySender sender, AiCliExecutor.CliType cliType) {
+        interactionService.exitAiMode(TYPE, message.userOpenId());
         if (interactionService.stopAiTask(TYPE, message.userOpenId(), cliType)) {
-            sender.passiveReply(message, "🛑 " + cliType.getDisplayName() + " 任务已停止。");
+            sender.passiveReply(message, "🛑 " + cliType.getDisplayName() + " 任务已停止，并已退出 AI 模式。");
         } else {
-            sender.passiveReply(message, "当前没有正在运行的 " + cliType.getDisplayName() + " 任务。");
+            sender.passiveReply(message, "当前没有正在运行的 " + cliType.getDisplayName() + " 任务，已退出 AI 模式。");
         }
     }
 
@@ -444,7 +492,8 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     /** 清理 AI 会话 ID。 */
     private void handleAiClear(IncomingC2cMessage message, ReplySender sender, AiCliExecutor.CliType cliType) {
         interactionService.clearAiSession(TYPE, message.userOpenId(), cliType);
-        sender.passiveReply(message, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
+        interactionService.exitAiMode(TYPE, message.userOpenId());
+        sender.passiveReply(message, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除，并已退出 AI 模式。");
     }
 
     /** 机器人帮助文案。 */
@@ -459,17 +508,30 @@ public class QqOfficialBotProvider implements ChatBotProvider {
                 /status - 查看 SSH 连接状态
 
                 AI 编程命令:
-                /codex <提示词> - 启动 Codex 任务
+                /codex [提示词] - 进入 Codex 模式
                 /codex_stop - 停止 Codex 任务
                 /codex_status - 查看 Codex 最近输出
                 /codex_clear - 清除 Codex 会话 ID
-                /claude <提示词> - 启动 Claude Code 任务
+                /claude [提示词] - 进入 Claude Code 模式
                 /claude_stop - 停止 Claude Code 任务
                 /claude_status - 查看 Claude Code 最近输出
                 /claude_clear - 清除 Claude Code 会话 ID
 
                 使用 AppID + AppSecret 直连 QQ Gateway，无需配置回调地址。
-                连接 SSH 后，直接发送文字即可执行 Shell 命令。""";
+                AI 模式下，后续普通输入会持续走对应 AI，直到 stop/clear 退出。
+                未进入 AI 模式时，连接 SSH 后直接发送文字即可执行 Shell 命令。""";
+    }
+
+    /** 兼容无斜杠 AI 控制命令（仅 stop/clear）。 */
+    private String normalizeAiControlAlias(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        String normalized = text.trim().toLowerCase();
+        return switch (normalized) {
+            case "codex_stop", "codex_clear", "claude_stop", "claude_clear" -> "/" + normalized;
+            default -> null;
+        };
     }
 
     /** 生成 SSH 会话列表文本。 */

@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -97,22 +98,42 @@ class BotInteractionServiceTest {
     @Test
     void shouldDisconnectAndStopAllTasksForBotType() {
         BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        service.enterAiMode("qq-official", "user-a", AiCliExecutor.CliType.CODEX);
+        service.enterAiMode("telegram", "user-b", AiCliExecutor.CliType.CLAUDE);
 
         service.disconnectAll("qq-official");
 
         verify(sshManager).disconnectAll("qq-official");
         verify(aiCliExecutor).stopAllForBotType("qq-official");
+        assertNull(service.getAiMode("qq-official", "user-a"));
+        assertEquals(AiCliExecutor.CliType.CLAUDE, service.getAiMode("telegram", "user-b"));
     }
 
     @Test
     void shouldReturnDisconnectedStatusWhenNoActiveConnection() {
         BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
         when(sshManager.getConnection("telegram", "user-1")).thenReturn(null);
+        service.enterAiMode("telegram", "user-1", AiCliExecutor.CliType.CODEX);
+        assertTrue(service.isInAiMode("telegram", "user-1"));
 
         BotInteractionService.DisconnectResult result = service.disconnect("telegram", "user-1");
 
         assertFalse(result.disconnected());
+        assertFalse(service.isInAiMode("telegram", "user-1"));
         verify(aiCliExecutor).stopAllForUser("telegram:user-1");
         verify(aiCliExecutor).clearAllSessions("telegram:user-1");
+    }
+
+    @Test
+    void shouldEnterAndExitAiMode() {
+        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+
+        service.enterAiMode("telegram", "user-9", AiCliExecutor.CliType.CODEX);
+        assertEquals(AiCliExecutor.CliType.CODEX, service.getAiMode("telegram", "user-9"));
+        assertTrue(service.isInAiMode("telegram", "user-9"));
+
+        service.exitAiMode("telegram", "user-9");
+        assertNull(service.getAiMode("telegram", "user-9"));
+        assertFalse(service.isInAiMode("telegram", "user-9"));
     }
 }

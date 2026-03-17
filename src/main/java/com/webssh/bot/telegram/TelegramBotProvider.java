@@ -151,6 +151,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             long chatId = message.getChatId();
             String userId = String.valueOf(message.getFrom().getId());
             String text = message.getText().trim();
+            String aliasCommand = normalizeAiControlAlias(text);
 
             // 鉴权检查
             if (!allowedUsers.isEmpty() && !allowedUsers.contains(userId)) {
@@ -159,11 +160,13 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
 
             try {
-                if (text.startsWith("/")) {
+                if (aliasCommand != null) {
+                    handleCommand(chatId, userId, aliasCommand);
+                } else if (text.startsWith("/")) {
                     // /命令 走管理逻辑；普通文本按 Shell 命令执行。
                     handleCommand(chatId, userId, text);
                 } else {
-                    handleShellInput(chatId, userId, text);
+                    handleUserInput(chatId, userId, text);
                 }
             } catch (Exception e) {
                 log.error("处理消息异常: {}", e.getMessage(), e);
@@ -183,11 +186,11 @@ public class TelegramBotProvider implements ChatBotProvider {
                 case "/connect" -> handleConnect(chatId, userId, arg);
                 case "/disconnect" -> handleDisconnect(chatId, userId);
                 case "/status" -> handleStatus(chatId, userId);
-                case "/codex" -> handleAiCli(chatId, userId, arg, AiCliExecutor.CliType.CODEX);
+                case "/codex" -> handleAiModeCommand(chatId, userId, arg, AiCliExecutor.CliType.CODEX);
                 case "/codex_stop" -> handleAiCliStop(chatId, userId, AiCliExecutor.CliType.CODEX);
                 case "/codex_status" -> handleAiCliStatus(chatId, userId, AiCliExecutor.CliType.CODEX);
                 case "/codex_clear" -> handleAiCliClear(chatId, userId, AiCliExecutor.CliType.CODEX);
-                case "/claude" -> handleAiCli(chatId, userId, arg, AiCliExecutor.CliType.CLAUDE);
+                case "/claude" -> handleAiModeCommand(chatId, userId, arg, AiCliExecutor.CliType.CLAUDE);
                 case "/claude_stop" -> handleAiCliStop(chatId, userId, AiCliExecutor.CliType.CLAUDE);
                 case "/claude_status" -> handleAiCliStatus(chatId, userId, AiCliExecutor.CliType.CLAUDE);
                 case "/claude_clear" -> handleAiCliClear(chatId, userId, AiCliExecutor.CliType.CLAUDE);
@@ -209,14 +212,15 @@ public class TelegramBotProvider implements ChatBotProvider {
                     /status — 查看连接状态
 
                     *AI 编程命令:*
-                    /codex <提示词> — Codex AI 任务
+                    /codex [提示词] — 进入 Codex AI 模式
                     /codex\\_stop — 停止 Codex 任务
                     /codex\\_clear — 清除 Codex 会话 ID
-                    /claude <提示词> — Claude Code 任务
+                    /claude [提示词] — 进入 Claude Code 模式
                     /claude\\_stop — 停止 Claude 任务
                     /claude\\_clear — 清除 Claude 会话 ID
 
-                    连接后直接发送文字即执行 Shell 命令。""", true);
+                    AI 模式下，后续普通输入会持续走对应 AI，直到 stop/clear 退出。
+                    未进入 AI 模式时，连接后直接发送文字即执行 Shell 命令。""", true);
         }
 
         /** 列出当前 WebSSH 用户可用的 SSH 会话。 */
@@ -271,12 +275,42 @@ public class TelegramBotProvider implements ChatBotProvider {
         /** 查询 SSH 连接状态。 */
         private void handleStatus(long chatId, String userId) {
             BotInteractionService.ConnectionStatus status = interactionService.getConnectionStatus(TYPE, userId);
+            AiCliExecutor.CliType aiMode = interactionService.getAiMode(TYPE, userId);
             if (!status.connected()) {
-                sendText(chatId, "📊 状态: 未连接\n使用 /list 查看可用会话，/connect 连接。");
+                StringBuilder sb = new StringBuilder("📊 状态: 未连接\n使用 /list 查看可用会话，/connect 连接。");
+                if (aiMode != null) {
+                    sb.append("\n🤖 AI 模式: ").append(aiMode.getDisplayName());
+                }
+                sendText(chatId, sb.toString());
             } else {
-                sendText(chatId, "📊 状态: 已连接到 *" + escapeMarkdown(status.profileName()) + "*\n"
-                        + "直接发送文字执行命令，/disconnect 断开。", true);
+                StringBuilder sb = new StringBuilder("📊 状态: 已连接到 *")
+                        .append(escapeMarkdown(status.profileName()))
+                        .append("*\n");
+                if (aiMode != null) {
+                    String cmdName = aiMode.name().toLowerCase();
+                    sb.append("🤖 AI 模式: ")
+                            .append(aiMode.getDisplayName())
+                            .append("（使用 /")
+                            .append(cmdName)
+                            .append("\\_stop 或 /")
+                            .append(cmdName)
+                            .append("\\_clear 退出）\n");
+                } else {
+                    sb.append("🤖 AI 模式: 未开启\n");
+                }
+                sb.append("直接发送文字执行命令，/disconnect 断开。");
+                sendText(chatId, sb.toString(), true);
             }
+        }
+
+        /** 普通输入路由：AI 模式下走 AI，否则走 Shell。 */
+        private void handleUserInput(long chatId, String userId, String text) {
+            AiCliExecutor.CliType aiMode = interactionService.getAiMode(TYPE, userId);
+            if (aiMode != null) {
+                startAiTask(chatId, userId, text, aiMode);
+                return;
+            }
+            handleShellInput(chatId, userId, text);
         }
 
         /** 普通文本按 Shell 命令执行，并将输出包裹为代码块。 */
@@ -294,12 +328,25 @@ public class TelegramBotProvider implements ChatBotProvider {
 
         // ========== AI CLI 通用命令 ==========
 
+        /** 进入 AI 模式；若带提示词则立即执行一次。 */
+        private void handleAiModeCommand(long chatId, String userId, String prompt, AiCliExecutor.CliType cliType) {
+            interactionService.enterAiMode(TYPE, userId, cliType);
+            String cmdName = cliType.name().toLowerCase();
+            if (prompt == null || prompt.isBlank()) {
+                sendText(chatId, "🤖 已进入 " + cliType.getDisplayName() + " 模式。\n"
+                        + "后续直接发送内容将按该模式执行。\n"
+                        + "使用 /" + cmdName + "\\_stop 或 /" + cmdName + "\\_clear 退出。", true);
+                return;
+            }
+            startAiTask(chatId, userId, prompt, cliType);
+        }
+
         /** 启动 AI CLI 任务并将流式输出推送到聊天窗口。 */
-        private void handleAiCli(long chatId, String userId, String prompt, AiCliExecutor.CliType cliType) {
+        private void startAiTask(long chatId, String userId, String prompt, AiCliExecutor.CliType cliType) {
             String name = cliType.getDisplayName();
             String cmdName = cliType.name().toLowerCase();
 
-            if (prompt.isEmpty()) {
+            if (prompt == null || prompt.isBlank()) {
                 sendText(chatId, "用法: /" + cmdName + " <提示词>\n例如: `/" + cmdName + " 分析当前项目结构`", true);
                 return;
             }
@@ -320,15 +367,17 @@ public class TelegramBotProvider implements ChatBotProvider {
         /** 清理 AI 会话上下文。 */
         private void handleAiCliClear(long chatId, String userId, AiCliExecutor.CliType cliType) {
             interactionService.clearAiSession(TYPE, userId, cliType);
-            sendText(chatId, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除。");
+            interactionService.exitAiMode(TYPE, userId);
+            sendText(chatId, "✨ " + cliType.getDisplayName() + " 的会话 ID 已清除，并已退出 AI 模式。");
         }
 
         /** 停止运行中的 AI 任务。 */
         private void handleAiCliStop(long chatId, String userId, AiCliExecutor.CliType cliType) {
+            interactionService.exitAiMode(TYPE, userId);
             if (interactionService.stopAiTask(TYPE, userId, cliType)) {
-                sendText(chatId, "🛑 " + cliType.getDisplayName() + " 任务已停止。");
+                sendText(chatId, "🛑 " + cliType.getDisplayName() + " 任务已停止，并已退出 AI 模式。");
             } else {
-                sendText(chatId, "当前没有正在运行的 " + cliType.getDisplayName() + " 任务。");
+                sendText(chatId, "当前没有正在运行的 " + cliType.getDisplayName() + " 任务，已退出 AI 模式。");
             }
         }
 
@@ -341,6 +390,18 @@ public class TelegramBotProvider implements ChatBotProvider {
             } else {
                 sendText(chatId, "📊 " + name + " 状态: 空闲\n使用 `/" + cmdName + " <提示词>` 启动任务。", true);
             }
+        }
+
+        /** 兼容无斜杠 AI 控制命令（仅 stop/clear）。 */
+        private String normalizeAiControlAlias(String text) {
+            if (text == null || text.isBlank()) {
+                return null;
+            }
+            String normalized = text.trim().toLowerCase();
+            return switch (normalized) {
+                case "codex_stop", "codex_clear", "claude_stop", "claude_clear" -> "/" + normalized;
+                default -> null;
+            };
         }
 
         private void sendText(long chatId, String text) {

@@ -258,10 +258,10 @@ webssh.ssh.allow-legacy-ssh-rsa=true
 两种机器人共用同一套核心命令：
 
 - SSH：`/list`、`/connect`、`/disconnect`、`/status`
-- AI：`/codex`、`/codex_stop`、`/codex_status`、`/codex_clear`
-- AI：`/claude`、`/claude_stop`、`/claude_status`、`/claude_clear`
+- AI：`/codex [提示词]`、`/codex_stop`、`/codex_status`、`/codex_clear`
+- AI：`/claude [提示词]`、`/claude_stop`、`/claude_status`、`/claude_clear`
 
-连接 SSH 后，直接发送普通文本即可作为 Shell 命令执行。
+`/codex` 或 `/claude` 会进入对应 AI 模式；进入后普通文本将持续按该模式执行，直到输入 `codex_stop` / `codex_clear` / `claude_stop` / `claude_clear`（支持带或不带 `/`）退出模式。未进入 AI 模式时，连接 SSH 后普通文本按 Shell 命令执行。
 
 ### QQ 私聊机器人说明
 

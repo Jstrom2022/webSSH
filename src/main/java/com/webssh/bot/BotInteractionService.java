@@ -25,6 +25,7 @@ public class BotInteractionService {
     private final BotSshSessionManager sshManager;
     private final AiCliExecutor aiCliExecutor;
     private final ConcurrentMap<String, AiTaskState> aiTaskStates = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, AiCliExecutor.CliType> aiModes = new ConcurrentHashMap<>();
 
     /** SSH 连接状态快照。 */
     public record ConnectionStatus(boolean connected, String profileName, String cwd) {
@@ -125,6 +126,7 @@ public class BotInteractionService {
         aiCliExecutor.stopAllForUser(userKey);
         aiCliExecutor.clearAllSessions(userKey);
         aiTaskStates.keySet().removeIf(key -> key.endsWith(":" + userKey));
+        aiModes.remove(userKey);
 
         BotSshSessionManager.SshConnection conn = sshManager.getConnection(botType, userId);
         if (conn == null) {
@@ -140,6 +142,7 @@ public class BotInteractionService {
         sshManager.disconnectAll(botType);
         aiCliExecutor.stopAllForBotType(botType);
         aiTaskStates.keySet().removeIf(key -> key.contains(":" + botType + ":"));
+        aiModes.keySet().removeIf(key -> key.startsWith(botType + ":"));
     }
 
     /** 查询当前用户 SSH 连接状态。 */
@@ -241,6 +244,29 @@ public class BotInteractionService {
             return new AiTaskSnapshot(false, "", "/tmp", "", Instant.EPOCH);
         }
         return state.snapshot();
+    }
+
+    /** 进入指定 AI 模式；后续普通输入将按该工具执行。 */
+    public void enterAiMode(String botType, String userId, AiCliExecutor.CliType cliType) {
+        if (cliType == null) {
+            return;
+        }
+        aiModes.put(userKey(botType, userId), cliType);
+    }
+
+    /** 退出 AI 模式，恢复普通输入路由。 */
+    public void exitAiMode(String botType, String userId) {
+        aiModes.remove(userKey(botType, userId));
+    }
+
+    /** 获取当前 AI 模式；返回 null 表示未处于 AI 模式。 */
+    public AiCliExecutor.CliType getAiMode(String botType, String userId) {
+        return aiModes.get(userKey(botType, userId));
+    }
+
+    /** 当前用户是否处于任意 AI 模式。 */
+    public boolean isInAiMode(String botType, String userId) {
+        return getAiMode(botType, userId) != null;
     }
 
     /** 生成用户唯一键，格式：botType:userId。 */

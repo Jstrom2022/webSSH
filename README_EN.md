@@ -258,10 +258,10 @@ Endpoint: `/ws/ssh`
 Both bots share the same core command set:
 
 - SSH: `/list`, `/connect`, `/disconnect`, `/status`
-- AI: `/codex`, `/codex_stop`, `/codex_status`, `/codex_clear`
-- AI: `/claude`, `/claude_stop`, `/claude_status`, `/claude_clear`
+- AI: `/codex [prompt]`, `/codex_stop`, `/codex_status`, `/codex_clear`
+- AI: `/claude [prompt]`, `/claude_stop`, `/claude_status`, `/claude_clear`
 
-Once connected to SSH, you can send plain text to execute it as a Shell command.
+`/codex` or `/claude` enters the corresponding AI mode. In AI mode, subsequent plain text is continuously handled by that AI until `codex_stop` / `codex_clear` / `claude_stop` / `claude_clear` is sent (with or without `/`). When AI mode is not enabled, plain text is executed as a Shell command after SSH is connected.
 
 ### QQ Private Bot Notes
 
