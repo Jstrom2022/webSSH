@@ -22,8 +22,11 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -53,6 +56,7 @@ class BotSshSessionManagerTest {
         manager.enqueueOpenedConnection(recoveredConnection);
 
         manager.connect("telegram", "user-1", "admin", "1");
+        clearInvocations(aiCliExecutor);
 
         String output = manager.executeCommandAsync("telegram", "user-1", "id")
                 .get(5, TimeUnit.SECONDS);
@@ -60,6 +64,31 @@ class BotSshSessionManagerTest {
         assertEquals("uid=0(root)\n", output);
         assertEquals("id\n", recoveredConnection.writtenCommand());
         assertTrue(staleConnection.wasClosed());
+        verify(aiCliExecutor).stopAllForUser("telegram:user-1");
+        verify(aiCliExecutor).clearAllSessions("telegram:user-1");
+    }
+
+    @Test
+    void shouldClearAiContextWhenGetConnectionDetectsExpiredSession() throws Exception {
+        TestableBotSshSessionManager manager = new TestableBotSshSessionManager(profileStore, sshProperties,
+                aiCliExecutor);
+
+        SshSessionProfile profile = createProfile();
+        when(profileStore.list("admin")).thenReturn(List.of(profile));
+        when(profileStore.get("admin", "profile-1")).thenReturn(profile);
+
+        StubConnection staleConnection = StubConnection.disconnected("prod-vps");
+        manager.enqueueOpenedConnection(staleConnection);
+
+        manager.connect("telegram", "user-2", "admin", "1");
+        clearInvocations(aiCliExecutor);
+
+        BotSshSessionManager.SshConnection connection = manager.getConnection("telegram", "user-2");
+
+        assertNull(connection);
+        assertTrue(staleConnection.wasClosed());
+        verify(aiCliExecutor).stopAllForUser("telegram:user-2");
+        verify(aiCliExecutor).clearAllSessions("telegram:user-2");
     }
 
     @Test
@@ -129,6 +158,12 @@ class BotSshSessionManagerTest {
 
         private static StubConnection withOutput(String profileName, String output) {
             return new StubConnection(profileName, null, output);
+        }
+
+        private static StubConnection disconnected(String profileName) {
+            StubConnection connection = new StubConnection(profileName, null, "");
+            connection.connected.set(false);
+            return connection;
         }
 
         @Override

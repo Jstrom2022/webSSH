@@ -752,8 +752,13 @@ public class BotSshSessionManager {
         if (conn == null) {
             return;
         }
-        connections.remove(key, conn);
+        boolean removed = connections.remove(key, conn);
         conn.close();
+        if (removed) {
+            // 连接失效后清理该用户 AI 任务与会话上下文，避免后续误续用旧会话。
+            aiCliExecutor.stopAllForUser(key);
+            aiCliExecutor.clearAllSessions(key);
+        }
     }
 
     /**
