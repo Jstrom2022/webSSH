@@ -31,12 +31,12 @@ class BotInteractionServiceTest {
     void shouldCacheAiOutputAndExposeSnapshot() {
         BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
         AtomicBoolean completed = new AtomicBoolean(false);
-        BotSshSessionManager.SshConnection connection = org.mockito.Mockito.mock(BotSshSessionManager.SshConnection.class);
+        BotSshSessionManager.SshConnection connection = org.mockito.Mockito
+                .mock(BotSshSessionManager.SshConnection.class);
         when(sshManager.getConnection("qq-official", "user-1")).thenReturn(connection);
         when(connection.getCwd()).thenReturn("/srv/app");
 
         doAnswer(invocation -> {
-            @SuppressWarnings("unchecked")
             java.util.function.Consumer<String> output = invocation.getArgument(5);
             Runnable onComplete = invocation.getArgument(6);
             output.accept("⏳ Codex 任务已启动...");

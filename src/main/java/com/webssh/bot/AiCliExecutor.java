@@ -46,29 +46,41 @@ public class AiCliExecutor {
      * 支持的 AI CLI 工具类型。
      */
     public enum CliType {
-        CODEX("Codex", "/opt/homebrew/bin/codex", "codex"),
-        CLAUDE("Claude Code", "/usr/local/bin/claude", "claude");
+        CODEX("Codex", "codex", new String[] {
+                "/opt/homebrew/bin/codex",
+                "/usr/local/bin/codex",
+                "/usr/bin/codex",
+                System.getProperty("user.home") + "/.local/bin/codex",
+                System.getProperty("user.home") + "/.npm-global/bin/codex"
+        }),
+        CLAUDE("Claude Code", "claude", new String[] {
+                "/usr/local/bin/claude",
+                "/opt/homebrew/bin/claude",
+                "/usr/bin/claude",
+                System.getProperty("user.home") + "/.npm-global/bin/claude",
+                System.getProperty("user.home") + "/.local/bin/claude"
+        });
 
         private final String displayName;
-        private final String defaultBin;
         private final String commandName;
+        private final String[] fallbackBins;
 
-        CliType(String displayName, String defaultBin, String commandName) {
+        CliType(String displayName, String commandName, String[] fallbackBins) {
             this.displayName = displayName;
-            this.defaultBin = defaultBin;
             this.commandName = commandName;
+            this.fallbackBins = fallbackBins;
         }
 
         public String getDisplayName() {
             return displayName;
         }
 
-        public String getDefaultBin() {
-            return defaultBin;
-        }
-
         public String getCommandName() {
             return commandName;
+        }
+
+        public String[] getFallbackBins() {
+            return fallbackBins.clone();
         }
     }
 
@@ -79,6 +91,8 @@ public class AiCliExecutor {
 
     /** 用户的会话 ID，key = cliType:botType:userId */
     private final ConcurrentMap<String, String> userSessionIds = new ConcurrentHashMap<>();
+    /** 启动后缓存的 CLI 可执行路径，key = cliType。 */
+    private final ConcurrentMap<CliType, String> resolvedBins = new ConcurrentHashMap<>();
 
     /**
      * 远端命令启动器抽象。
@@ -97,6 +111,10 @@ public class AiCliExecutor {
         t.setDaemon(true);
         return t;
     });
+
+    public AiCliExecutor() {
+        detectCliBinariesAtStartup();
+    }
 
     /** 应用销毁前关闭所有任务并回收线程。 */
     @PreDestroy
@@ -426,7 +444,7 @@ public class AiCliExecutor {
     /** 构建 Codex CLI 命令参数。 */
     private List<String> buildCodexCommand(String prompt, String workDir, String sessionId) {
         List<String> cmd = new ArrayList<>();
-        cmd.add(CliType.CODEX.getDefaultBin());
+        cmd.add(CliType.CODEX.getCommandName());
 
         cmd.add("exec");
 
@@ -450,7 +468,7 @@ public class AiCliExecutor {
     /** 构建 Claude Code 命令参数。 */
     private List<String> buildClaudeCommand(String prompt, String workDir, String sessionId) {
         List<String> cmd = new ArrayList<>();
-        cmd.add(CliType.CLAUDE.getDefaultBin());
+        cmd.add(CliType.CLAUDE.getCommandName());
         cmd.add("-p");
         cmd.add(prompt);
         cmd.add("--output-format");
@@ -640,27 +658,57 @@ public class AiCliExecutor {
 
     // ==================== 二进制路径解析 ====================
 
-    /** 尝试找到 CLI 二进制路径 */
-    private String resolveBin(CliType cliType) {
-        // 优先使用默认路径
-        if (new java.io.File(cliType.getDefaultBin()).canExecute()) {
-            return cliType.getDefaultBin();
-        }
-        // 尝试常见路径
-        String[] candidates = switch (cliType) {
-            case CODEX -> new String[] { "/opt/homebrew/bin/codex", "/usr/local/bin/codex" };
-            case CLAUDE -> new String[] { "/usr/local/bin/claude", "/opt/homebrew/bin/claude",
-                    System.getProperty("user.home") + "/.npm-global/bin/claude",
-                    System.getProperty("user.home") + "/.local/bin/claude" };
-        };
-        for (String path : candidates) {
-            if (new java.io.File(path).canExecute()) {
-                return path;
+    /** 服务启动时优先用 `which` 探测 CLI 路径并缓存。 */
+    private void detectCliBinariesAtStartup() {
+        for (CliType cliType : CliType.values()) {
+            String resolved = resolveBinNow(cliType);
+            if (resolved != null) {
+                resolvedBins.put(cliType, resolved);
+                log.info("{} CLI 已探测到可执行路径: {}", cliType.getDisplayName(), resolved);
+            } else {
+                log.warn("{} CLI 未在启动时探测到可执行路径（命令: {}）", cliType.getDisplayName(), cliType.getCommandName());
             }
         }
-        // 最后尝试 which
+    }
+
+    /** 尝试找到 CLI 二进制路径 */
+    private String resolveBin(CliType cliType) {
+        String cached = resolvedBins.get(cliType);
+        if (isExecutable(cached)) {
+            return cached;
+        }
+        String refreshed = resolveBinNow(cliType);
+        if (refreshed != null) {
+            resolvedBins.put(cliType, refreshed);
+            return refreshed;
+        }
+        resolvedBins.remove(cliType);
+        return null;
+    }
+
+    /**
+     * 实际执行一次路径探测。
+     * <p>
+     * 先尝试 `which`，再尝试固定候选路径。
+     * </p>
+     */
+    private String resolveBinNow(CliType cliType) {
+        String fromWhich = resolveByWhich(cliType.getCommandName());
+        if (isExecutable(fromWhich)) {
+            return fromWhich;
+        }
+        for (String candidate : cliType.getFallbackBins()) {
+            if (isExecutable(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /** 用 which 查找命令路径。 */
+    private String resolveByWhich(String commandName) {
         try {
-            Process p = new ProcessBuilder("which", cliType == CliType.CODEX ? "codex" : "claude")
+            Process p = new ProcessBuilder("which", commandName)
                     .redirectErrorStream(true).start();
             String result = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
             if (p.waitFor() == 0 && !result.isBlank()) {
@@ -669,5 +717,9 @@ public class AiCliExecutor {
         } catch (Exception ignored) {
         }
         return null;
+    }
+
+    private boolean isExecutable(String path) {
+        return path != null && !path.isBlank() && new File(path).canExecute();
     }
 }

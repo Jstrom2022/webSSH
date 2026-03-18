@@ -38,6 +38,8 @@ import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -67,7 +69,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <li>每个 WebSocket 会话对应一个 {@link ClientConnection}，存储 SSH 会话、通道和所有运行状态</li>
  * <li>SFTP 下载采用分块 + ACK 流控机制，避免大文件传输时浏览器内存溢出</li>
  * <li>SFTP 上传支持分片传输，由前端分片后逐块发送</li>
- * <li>IO 密集型操作（SFTP）提交到独立线程池 {@code ioExecutor}，避免阻塞 WebSocket 线程</li>
+ * <li>IO 密集型操作（SFTP）提交到有界线程池，Shell 输出读取使用独立执行器，互不阻塞</li>
  * <li>Shell 输出流通过 {@link ShellOutputFilter} 过滤掉注入的工作目录探测命令回显</li>
  * </ol>
  *
@@ -87,14 +89,14 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     /** WebSocket 单条文本消息最大字节数：8MB，需与 WebSocketConfig 中的容器配置一致 */
     private static final int WS_TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 
-    /** IO 线程池核心线程数：至少 4 个，取 CPU 核心数和 4 的较大值 */
-    private static final int IO_CORE_THREADS = Math.max(4, Runtime.getRuntime().availableProcessors());
+    /** SFTP 线程池核心线程数：至少 4 个，取 CPU 核心数和 4 的较大值 */
+    private static final int SFTP_CORE_THREADS = Math.max(4, Runtime.getRuntime().availableProcessors());
 
-    /** IO 线程池最大线程数：核心线程数的 2 倍 */
-    private static final int IO_MAX_THREADS = IO_CORE_THREADS * 2;
+    /** SFTP 线程池最大线程数：核心线程数的 2 倍 */
+    private static final int SFTP_MAX_THREADS = SFTP_CORE_THREADS * 2;
 
-    /** IO 线程池任务队列容量：超过此限制的任务会被拒绝，返回"系统繁忙"提示 */
-    private static final int IO_QUEUE_CAPACITY = 256;
+    /** SFTP 线程池任务队列容量：超过此限制的任务会被拒绝，返回"系统繁忙"提示 */
+    private static final int SFTP_QUEUE_CAPACITY = 256;
 
     /** 最大并发 WebSocket 连接数，防止资源耗尽 */
     private static final int MAX_CONNECTIONS = 200;
@@ -148,8 +150,11 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     /** 所有活跃的 WebSocket 客户端连接，key 为 WebSocketSession.getId() */
     private final ConcurrentMap<String, ClientConnection> connections = new ConcurrentHashMap<>();
 
-    /** IO 密集型任务线程池，用于 SFTP 操作和 SSH 输出读取等阻塞 IO */
-    private final ThreadPoolExecutor ioExecutor;
+    /** SFTP 阻塞任务线程池（有界队列），防止突发任务无限堆积 */
+    private final ThreadPoolExecutor sftpExecutor;
+
+    /** Shell 输出读取执行器（无排队），每个连接的长生命周期读取任务独立占用线程 */
+    private final ExecutorService shellOutputExecutor;
 
     /** 定时清理调度器，用于回收超时的上传会话等泄漏资源 */
     private final ScheduledExecutorService cleanupScheduler;
@@ -214,12 +219,13 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * 构造函数：初始化 SSH 兼容性配置和 IO 线程池。
+     * 构造函数：初始化 SSH 兼容性配置与异步执行器。
      *
      * <p>
-     * 线程池使用有界队列 + AbortPolicy 策略：当系统负载过高时，
+     * SFTP 使用有界队列 + AbortPolicy 策略：当系统负载过高时，
      * 新提交的任务会被拒绝并返回"系统繁忙"提示，而不是无限排队导致内存溢出。
-     * 线程设为守护线程，JVM 退出时自动终止。
+     * Shell 输出读取使用独立执行器，避免长生命周期读取任务占满 SFTP 处理线程。
+     * 所有线程均设为守护线程，JVM 退出时自动终止。
      *
      * @param sshCompatibilityProperties SSH 兼容性配置，注入自 Spring 容器
      */
@@ -227,21 +233,28 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             ObjectMapper objectMapper) {
         this.sshCompatibilityProperties = sshCompatibilityProperties;
         this.objectMapper = objectMapper;
-        AtomicInteger threadCounter = new AtomicInteger(1);
-        this.ioExecutor = new ThreadPoolExecutor(
-                IO_CORE_THREADS,
-                IO_MAX_THREADS,
+        AtomicInteger sftpThreadCounter = new AtomicInteger(1);
+        this.sftpExecutor = new ThreadPoolExecutor(
+                SFTP_CORE_THREADS,
+                SFTP_MAX_THREADS,
                 60L,
                 TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(IO_QUEUE_CAPACITY),
+                new ArrayBlockingQueue<>(SFTP_QUEUE_CAPACITY),
                 r -> {
                     Thread t = new Thread(r);
-                    t.setName("ssh-io-" + threadCounter.getAndIncrement());
+                    t.setName("ssh-sftp-" + sftpThreadCounter.getAndIncrement());
                     t.setDaemon(true);
                     return t;
                 },
                 new ThreadPoolExecutor.AbortPolicy());
-        this.ioExecutor.allowCoreThreadTimeOut(true);
+        this.sftpExecutor.allowCoreThreadTimeOut(true);
+        AtomicInteger shellThreadCounter = new AtomicInteger(1);
+        this.shellOutputExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r);
+            t.setName("ssh-shell-output-" + shellThreadCounter.getAndIncrement());
+            t.setDaemon(true);
+            return t;
+        });
         this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "ssh-cleanup");
             t.setDaemon(true);
@@ -324,15 +337,15 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                 case "resize" -> handleResize(connection, payload);
                 case "disconnect" -> handleDisconnect(connection);
                 case "ping" -> sendPong(connection.webSocketSession());
-                // SFTP 操作提交到 IO 线程池异步执行，避免阻塞 WebSocket 消息处理线程
-                case "sftp_list" -> submitIoTask(connection, "SFTP 列表", () -> handleSftpList(connection, payload));
+                // SFTP 操作提交到有界线程池异步执行，避免阻塞 WebSocket 消息处理线程
+                case "sftp_list" -> submitSftpTask(connection, "SFTP 列表", () -> handleSftpList(connection, payload));
                 case "sftp_download" ->
-                    submitIoTask(connection, "SFTP 下载", () -> handleSftpDownload(connection, payload));
+                    submitSftpTask(connection, "SFTP 下载", () -> handleSftpDownload(connection, payload));
                 case "sftp_download_ack" -> handleSftpDownloadAck(connection, payload);
                 case "sftp_upload_start" -> handleSftpUploadStart(connection, payload);
                 case "sftp_upload_chunk" -> handleSftpUploadChunk(connection, payload);
-                case "sftp_upload" -> submitIoTask(connection, "SFTP 上传", () -> handleSftpUpload(connection, payload));
-                case "sftp_mkdir" -> submitIoTask(connection, "SFTP 创建目录", () -> handleSftpMkdir(connection, payload));
+                case "sftp_upload" -> submitSftpTask(connection, "SFTP 上传", () -> handleSftpUpload(connection, payload));
+                case "sftp_mkdir" -> submitSftpTask(connection, "SFTP 创建目录", () -> handleSftpMkdir(connection, payload));
                 case "port_forward_add" -> handlePortForwardAdd(connection, payload);
                 case "port_forward_remove" -> handlePortForwardRemove(connection, payload);
                 case "port_forward_list" -> handlePortForwardList(connection);
@@ -373,19 +386,24 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
     /**
      * 应用关闭时的清理方法（由 Spring {@code @PreDestroy} 触发）。
-     * 关闭所有活跃的客户端连接，并立即终止 IO 线程池中正在执行的任务。
+     * 关闭所有活跃的客户端连接，并终止执行器中的异步任务。
      */
     @PreDestroy
     public void shutdown() {
         cleanupScheduler.shutdownNow();
         connections.values().forEach(ClientConnection::close);
-        ioExecutor.shutdown();
+        shutdownExecutor(sftpExecutor);
+        shutdownExecutor(shellOutputExecutor);
+    }
+
+    private void shutdownExecutor(ExecutorService executor) {
+        executor.shutdown();
         try {
-            if (!ioExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                ioExecutor.shutdownNow();
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
             }
         } catch (InterruptedException e) {
-            ioExecutor.shutdownNow();
+            executor.shutdownNow();
             Thread.currentThread().interrupt();
         }
     }
@@ -408,7 +426,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * 将阻塞 IO 任务提交到 IO 线程池异步执行。
+     * 将 SFTP 阻塞任务提交到有界线程池异步执行。
      *
      * <p>
      * 如果 WebSocket 在任务执行期间关闭，不视为异常（静默忽略）。
@@ -419,9 +437,17 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
      * @param task       要异步执行的任务
      * @return true 表示任务已提交，false 表示被拒绝
      */
-    private boolean submitIoTask(ClientConnection connection, String taskName, Runnable task) {
+    private boolean submitSftpTask(ClientConnection connection, String taskName, Runnable task) {
+        return submitTask(sftpExecutor, connection, taskName, task);
+    }
+
+    private boolean submitShellOutputTask(ClientConnection connection, Runnable task) {
+        return submitTask(shellOutputExecutor, connection, "SSH 输出读取", task);
+    }
+
+    private boolean submitTask(Executor executor, ClientConnection connection, String taskName, Runnable task) {
         try {
-            ioExecutor.execute(() -> {
+            executor.execute(() -> {
                 try {
                     task.run();
                 } catch (Throwable t) {
@@ -543,7 +569,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                             actualFingerprint));
             attached = true;
             connection.armShellCwdSync();
-            if (!submitIoTask(connection, "SSH 输出读取", () -> pumpOutput(connection))) {
+            if (!submitShellOutputTask(connection, () -> pumpOutput(connection))) {
                 connection.close();
                 return;
             }
@@ -1045,7 +1071,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     // ==================== SSH 输出推送 ====================
 
     /**
-     * 持续读取 SSH Shell 输出并推送到前端（在 IO 线程池中运行）。
+     * 持续读取 SSH Shell 输出并推送到前端（在独立 Shell 输出执行器中运行）。
      *
      * <p>
      * 这是一个阻塞循环，从 Shell 通道的 InputStream 读取数据，经过
