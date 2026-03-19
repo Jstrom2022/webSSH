@@ -1,7 +1,9 @@
 package com.webssh.ws;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.webssh.config.ResourceGovernanceProperties;
 import com.webssh.config.SshCompatibilityProperties;
+import com.webssh.task.UserResourceGovernor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -41,7 +43,11 @@ class SshWebSocketHandlerTest {
 
     @Test
     void shouldReplyPongWhenReceivePing() throws Exception {
-        SshWebSocketHandler handler = new SshWebSocketHandler(sshCompatibilityProperties, new ObjectMapper());
+        SshWebSocketHandler handler = new SshWebSocketHandler(
+                sshCompatibilityProperties,
+                new ObjectMapper(),
+                new ResourceGovernanceProperties(),
+                new UserResourceGovernor(new ResourceGovernanceProperties()));
         try {
             when(webSocketSession.getId()).thenReturn("ws-test");
             when(webSocketSession.isOpen()).thenReturn(true);
@@ -62,7 +68,11 @@ class SshWebSocketHandlerTest {
 
     @Test
     void shouldUseSeparatedExecutorsForShellOutputAndSftpTasks() throws Exception {
-        SshWebSocketHandler handler = new SshWebSocketHandler(sshCompatibilityProperties, new ObjectMapper());
+        SshWebSocketHandler handler = new SshWebSocketHandler(
+                sshCompatibilityProperties,
+                new ObjectMapper(),
+                new ResourceGovernanceProperties(),
+                new UserResourceGovernor(new ResourceGovernanceProperties()));
         try {
             ThreadPoolExecutor sftpExecutor = (ThreadPoolExecutor) readField(handler, "sftpExecutor");
             ExecutorService shellOutputExecutor = (ExecutorService) readField(handler, "shellOutputExecutor");
@@ -78,7 +88,11 @@ class SshWebSocketHandlerTest {
 
     @Test
     void shutdownShouldCloseBothExecutors() throws Exception {
-        SshWebSocketHandler handler = new SshWebSocketHandler(sshCompatibilityProperties, new ObjectMapper());
+        SshWebSocketHandler handler = new SshWebSocketHandler(
+                sshCompatibilityProperties,
+                new ObjectMapper(),
+                new ResourceGovernanceProperties(),
+                new UserResourceGovernor(new ResourceGovernanceProperties()));
         ThreadPoolExecutor sftpExecutor = (ThreadPoolExecutor) readField(handler, "sftpExecutor");
         ExecutorService shellOutputExecutor = (ExecutorService) readField(handler, "shellOutputExecutor");
 

@@ -6,7 +6,10 @@ import com.webssh.bot.AiCliExecutor;
 import com.webssh.bot.BotInteractionService;
 import com.webssh.bot.BotSettings;
 import com.webssh.bot.ChatBotProvider;
+import com.webssh.config.ResourceGovernanceProperties;
 import com.webssh.session.SshSessionProfile;
+import com.webssh.task.BoundedExecutorFactory;
+import com.webssh.task.UserResourceGovernor;
 import jakarta.annotation.PreDestroy;
 import jakarta.websocket.ClientEndpointConfig;
 import jakarta.websocket.CloseReason;
@@ -36,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
@@ -83,6 +87,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
 
     private final BotInteractionService interactionService;
     private final ObjectMapper objectMapper;
+    private final UserResourceGovernor resourceGovernor;
     private final HttpClient httpClient;
     private final WebSocketContainer webSocketContainer;
     /** 心跳与重连调度器（单线程保证顺序）。 */
@@ -92,11 +97,7 @@ public class QqOfficialBotProvider implements ChatBotProvider {
         return t;
     });
     /** 事件处理线程池，避免 Gateway IO 线程被业务逻辑阻塞。 */
-    private final ExecutorService eventExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "qq-bot-event");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService eventExecutor;
     /** 最近事件 ID 去重集合。 */
     private final Set<String> recentEventIds = ConcurrentHashMap.newKeySet();
     /** 最近事件 ID 顺序队列，用于控制去重窗口大小。 */
@@ -136,12 +137,16 @@ public class QqOfficialBotProvider implements ChatBotProvider {
     record CommandInput(String command, String argument) {
     }
 
-    public QqOfficialBotProvider(BotInteractionService interactionService, ObjectMapper objectMapper) {
+    public QqOfficialBotProvider(BotInteractionService interactionService, ObjectMapper objectMapper,
+            ResourceGovernanceProperties resourceProperties, UserResourceGovernor resourceGovernor) {
         this.interactionService = interactionService;
         this.objectMapper = objectMapper;
+        this.resourceGovernor = resourceGovernor;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
+        this.eventExecutor = BoundedExecutorFactory.newExecutor("qq-bot-event-",
+                resourceProperties.getQqEvent());
         this.webSocketContainer = ContainerProvider.getWebSocketContainer();
         this.webSocketContainer.setDefaultMaxSessionIdleTimeout(0L);
     }
@@ -760,7 +765,28 @@ public class QqOfficialBotProvider implements ChatBotProvider {
             return;
         }
 
-        eventExecutor.submit(() -> processIncomingMessage(event, config, new HttpReplySender()));
+        String userKey = TYPE + ":" + event.userOpenId();
+        if (!resourceGovernor.allowQqMessage(userKey)) {
+            log.warn("QQ 消息触发限流 [{}], eventId={}", userKey, event.eventId());
+            return;
+        }
+        UserResourceGovernor.Permit permit = resourceGovernor.tryAcquireQqEvent(userKey);
+        if (!permit.granted()) {
+            log.warn("QQ 事件并发超限 [{}], eventId={}", userKey, event.eventId());
+            return;
+        }
+        try {
+            eventExecutor.submit(() -> {
+                try (permit) {
+                    processIncomingMessage(event, config, new HttpReplySender());
+                } catch (Throwable t) {
+                    log.warn("处理 QQ 私聊消息失败 [{}]: {}", userKey, t.getMessage(), t);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            permit.close();
+            log.warn("QQ 事件线程池繁忙，丢弃消息 [{}], eventId={}", userKey, event.eventId());
+        }
     }
 
     /** 解析 C2C_MESSAGE_CREATE payload。 */

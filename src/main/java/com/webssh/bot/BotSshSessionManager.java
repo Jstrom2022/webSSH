@@ -4,9 +4,12 @@ import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.ChannelExec;
 import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
+import com.webssh.config.ResourceGovernanceProperties;
 import com.webssh.config.SshCompatibilityProperties;
 import com.webssh.session.SessionProfileStore;
 import com.webssh.session.SshSessionProfile;
+import com.webssh.task.BoundedExecutorFactory;
+import com.webssh.task.UserResourceGovernor;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.function.Consumer;
 
 /**
@@ -73,6 +76,10 @@ public class BotSshSessionManager {
     private final SshCompatibilityProperties sshProperties;
     /** AI CLI 执行器，用于连接断开时同步清理任务上下文。 */
     private final AiCliExecutor aiCliExecutor;
+    /** 统一资源治理配置。 */
+    private final ResourceGovernanceProperties resourceProperties;
+    /** 用户级资源配额守卫。 */
+    private final UserResourceGovernor resourceGovernor;
     /** 活跃 SSH 连接表，key=botType:userId。 */
     private final ConcurrentMap<String, SshConnection> connections = new ConcurrentHashMap<>();
     /** 自动重连所需的连接参数与 cwd 上下文。 */
@@ -80,11 +87,7 @@ public class BotSshSessionManager {
     /** 每个连接独立重连锁，避免并发请求触发重复重连。 */
     private final ConcurrentMap<String, Object> reconnectLocks = new ConcurrentHashMap<>();
     /** 命令输出读取线程池。 */
-    private final ExecutorService outputExecutor = Executors.newCachedThreadPool(r -> {
-        Thread t = new Thread(r, "bot-ssh-output");
-        t.setDaemon(true);
-        return t;
-    });
+    private final ExecutorService outputExecutor;
 
     /** 建连所需的最小参数快照，供断线重连复用。 */
     record ConnectionSpec(
@@ -169,6 +172,10 @@ public class BotSshSessionManager {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    /** 普通命令读取结果。 */
+    public record CommandReadResult(String output, boolean timedOut) {
     }
 
     /** SSH 连接状态封装 */
@@ -273,21 +280,34 @@ public class BotSshSessionManager {
         }
 
         /** 读取当前命令的完整可见输出，并同步更新工作目录。 */
-        public synchronized String readAvailableOutput(long initialDelayMs, long idleTimeoutMs) {
+        public synchronized CommandReadResult readAvailableOutput(long initialDelayMs, long idleTimeoutMs,
+                long maxDurationMs) {
             ByteArrayOutputStream visibleBuffer = new ByteArrayOutputStream();
             ChannelExec execChannel = activeExecChannel;
             InputStream execOutput = activeExecOutput;
             if (execChannel == null || execOutput == null) {
-                return "";
+                return new CommandReadResult("", false);
             }
 
             byte[] buf = new byte[OUTPUT_BUFFER_SIZE];
+            long startedAt = System.currentTimeMillis();
+            boolean timedOut = false;
             try {
                 // 给远端命令一点启动时间，降低“刚启动就读取到空输出”的概率。
-                Thread.sleep(initialDelayMs);
+                long initialWait = maxDurationMs > 0 ? Math.min(initialDelayMs, maxDurationMs) : initialDelayMs;
+                if (initialWait > 0) {
+                    Thread.sleep(initialWait);
+                }
+                if (maxDurationMs > 0 && System.currentTimeMillis() - startedAt >= maxDurationMs) {
+                    timedOut = true;
+                }
 
                 long lastReadTime = System.currentTimeMillis();
-                while (System.currentTimeMillis() - lastReadTime < idleTimeoutMs) {
+                while (!timedOut && System.currentTimeMillis() - lastReadTime < idleTimeoutMs) {
+                    if (maxDurationMs > 0 && System.currentTimeMillis() - startedAt >= maxDurationMs) {
+                        timedOut = true;
+                        break;
+                    }
                     int available = execOutput.available();
                     if (available > 0) {
                         int read = execOutput.read(buf, 0, Math.min(available, buf.length));
@@ -316,7 +336,13 @@ public class BotSshSessionManager {
                     reconnectContext.updateCwd(this.cwd);
                 }
             }
-            return result.output();
+            String output = result.output();
+            if (timedOut) {
+                output = output == null || output.isBlank()
+                        ? "⏱️ 命令执行超时，已中断。"
+                        : output + "\n\n⏱️ 命令执行超时，已中断。";
+            }
+            return new CommandReadResult(output, timedOut);
         }
 
         /** 关闭连接与关联通道。该方法可重复调用。 */
@@ -351,10 +377,16 @@ public class BotSshSessionManager {
 
     public BotSshSessionManager(SessionProfileStore profileStore,
             SshCompatibilityProperties sshProperties,
-            AiCliExecutor aiCliExecutor) {
+            AiCliExecutor aiCliExecutor,
+            ResourceGovernanceProperties resourceProperties,
+            UserResourceGovernor resourceGovernor) {
         this.profileStore = profileStore;
         this.sshProperties = sshProperties;
         this.aiCliExecutor = aiCliExecutor;
+        this.resourceProperties = resourceProperties;
+        this.resourceGovernor = resourceGovernor;
+        this.outputExecutor = BoundedExecutorFactory.newExecutor("bot-ssh-output-",
+                resourceProperties.getBotCommand());
     }
 
     /** 应用关闭时统一释放 SSH 连接和输出线程池。 */
@@ -493,24 +525,38 @@ public class BotSshSessionManager {
 
     /** 异步执行命令并聚合完整输出，便于 QQ 等平台在单条消息中回复结果 */
     public CompletableFuture<String> executeCommandAsync(String botType, String userId, String command) {
+        String userKey = connectionKey(botType, userId);
+        UserResourceGovernor.Permit permit = resourceGovernor.tryAcquireBotCommand(userKey);
+        if (!permit.granted()) {
+            return CompletableFuture.failedFuture(new IllegalStateException("当前用户正在执行过多命令，请稍后再试。"));
+        }
         CompletableFuture<String> future = new CompletableFuture<>();
-        outputExecutor.submit(() -> {
-            try {
-                SshConnection conn = sendCommandWithReconnect(botType, userId, command);
-                String output = conn.readAvailableOutput(OUTPUT_INITIAL_DELAY_MS, OUTPUT_IDLE_TIMEOUT_MS);
-                if (output.isEmpty()) {
-                    future.complete("(无输出)");
-                    return;
+        try {
+            outputExecutor.submit(() -> {
+                try (permit) {
+                    SshConnection conn = sendCommandWithReconnect(botType, userId, command);
+                    CommandReadResult readResult = conn.readAvailableOutput(
+                            OUTPUT_INITIAL_DELAY_MS,
+                            OUTPUT_IDLE_TIMEOUT_MS,
+                            resourceProperties.getBotCommandTimeout().toMillis());
+                    String output = readResult.output();
+                    if (output.isEmpty()) {
+                        future.complete("(无输出)");
+                        return;
+                    }
+                    // 去掉 ANSI 控制符，避免聊天平台出现乱码控制字符。
+                    future.complete(stripAnsiCodes(output));
+                } catch (IOException e) {
+                    future.completeExceptionally(new IllegalStateException(e.getMessage(), e));
+                } catch (Exception e) {
+                    log.error("执行命令异常: {}", e.getMessage(), e);
+                    future.completeExceptionally(new IllegalStateException("读取输出失败: " + e.getMessage(), e));
                 }
-                // 去掉 ANSI 控制符，避免聊天平台出现乱码控制字符。
-                future.complete(stripAnsiCodes(output));
-            } catch (IOException e) {
-                future.completeExceptionally(new IllegalStateException(e.getMessage(), e));
-            } catch (Exception e) {
-                log.error("执行命令异常: {}", e.getMessage(), e);
-                future.completeExceptionally(new IllegalStateException("读取输出失败: " + e.getMessage(), e));
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            permit.close();
+            return CompletableFuture.failedFuture(new IllegalStateException("系统繁忙，请稍后再试。", e));
+        }
         return future;
     }
 
@@ -598,7 +644,7 @@ public class BotSshSessionManager {
             }
             // 触发一次轻量命令，确保 cwd 与远端环境同步。
             conn.sendCommand("printf '%s' \"$PWD\"");
-            conn.readAvailableOutput(50, 500);
+            conn.readAvailableOutput(50, 500, Math.min(2_000L, resourceProperties.getBotCommandTimeout().toMillis()));
 
             return conn;
         } catch (Exception e) {

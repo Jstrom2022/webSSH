@@ -8,6 +8,7 @@ import com.webssh.session.SshSessionProfile;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.telegram.telegrambots.bots.DefaultBotOptions;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.TelegramBotsApi;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
@@ -15,6 +16,7 @@ import org.telegram.telegrambots.meta.api.objects.Message;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
+import org.telegram.telegrambots.updatesreceivers.ExponentialBackOff;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +36,12 @@ public class TelegramBotProvider implements ChatBotProvider {
 
     private static final Logger log = LoggerFactory.getLogger(TelegramBotProvider.class);
     private static final String TYPE = "telegram";
+    /** Long Polling 断线重连：首次退避时长（毫秒）。 */
+    private static final int RECONNECT_INITIAL_INTERVAL_MS = 1_000;
+    /** Long Polling 断线重连：最大退避时长（毫秒）。 */
+    private static final int RECONNECT_MAX_INTERVAL_MS = 30_000;
+    /** Long Polling 断线重连：总退避窗口（毫秒，达到后固定为该值）。 */
+    private static final int RECONNECT_MAX_ELAPSED_MS = 30_000;
 
     private final BotInteractionService interactionService;
 
@@ -80,7 +88,7 @@ public class TelegramBotProvider implements ChatBotProvider {
         String sshUsername = settings.getSshUsername();
 
         try {
-            bot = new InternalBot(token, botUsername, allowedUsers, sshUsername);
+            bot = new InternalBot(buildBotOptions(), token, botUsername, allowedUsers, sshUsername);
             botsApi = new TelegramBotsApi(DefaultBotSession.class);
             botSession = (DefaultBotSession) botsApi.registerBot(bot);
             running = true;
@@ -121,6 +129,21 @@ public class TelegramBotProvider implements ChatBotProvider {
     }
 
     /**
+     * 构建 Telegram Long Polling 的运行参数。
+     * 这里显式收紧重连退避上限，避免网络抖动后长时间不重试。
+     */
+    private DefaultBotOptions buildBotOptions() {
+        DefaultBotOptions options = new DefaultBotOptions();
+        options.setBackOff(new ExponentialBackOff.Builder()
+                .setInitialIntervalMillis(RECONNECT_INITIAL_INTERVAL_MS)
+                .setMultiplier(1.5)
+                .setMaxIntervalMillis(RECONNECT_MAX_INTERVAL_MS)
+                .setMaxElapsedTimeMillis(RECONNECT_MAX_ELAPSED_MS)
+                .build());
+        return options;
+    }
+
+    /**
      * 内部 Telegram Bot 实现，处理消息接收和命令分发。
      */
     private class InternalBot extends TelegramLongPollingBot {
@@ -130,8 +153,9 @@ public class TelegramBotProvider implements ChatBotProvider {
         private final Set<String> allowedUsers;
         private final String sshUsername;
 
-        InternalBot(String token, String botUsername, Set<String> allowedUsers, String sshUsername) {
-            super(token);
+        InternalBot(DefaultBotOptions options, String token, String botUsername,
+                Set<String> allowedUsers, String sshUsername) {
+            super(options, token);
             this.botUsername = botUsername;
             this.allowedUsers = allowedUsers;
             this.sshUsername = sshUsername;
@@ -359,7 +383,8 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
 
             BotInteractionService.StartAiTaskResult result = interactionService.startAiTask(TYPE, userId, prompt, cliType,
-                    output -> sendText(chatId, output, true),
+                    // AI 输出内容不可控，可能包含 Telegram Markdown 非法片段；统一按纯文本发送更稳妥。
+                    output -> sendText(chatId, output, false),
                     () -> log.debug("{} 任务结束 [{}:{}]", name, TYPE, userId));
             if (!result.started()) {
                 sendText(chatId, "❌ " + result.message());

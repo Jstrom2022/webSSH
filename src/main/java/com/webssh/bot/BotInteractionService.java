@@ -1,10 +1,12 @@
 package com.webssh.bot;
 
 import com.webssh.session.SshSessionProfile;
+import com.webssh.task.UserResourceGovernor;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
@@ -24,6 +26,7 @@ public class BotInteractionService {
 
     private final BotSshSessionManager sshManager;
     private final AiCliExecutor aiCliExecutor;
+    private final UserResourceGovernor resourceGovernor;
     private final ConcurrentMap<String, AiTaskState> aiTaskStates = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AiCliExecutor.CliType> aiModes = new ConcurrentHashMap<>();
 
@@ -100,9 +103,11 @@ public class BotInteractionService {
         }
     }
 
-    public BotInteractionService(BotSshSessionManager sshManager, AiCliExecutor aiCliExecutor) {
+    public BotInteractionService(BotSshSessionManager sshManager, AiCliExecutor aiCliExecutor,
+            UserResourceGovernor resourceGovernor) {
         this.sshManager = sshManager;
         this.aiCliExecutor = aiCliExecutor;
+        this.resourceGovernor = resourceGovernor;
     }
 
     /** 列出指定 WebSSH 用户已保存的 SSH 会话。 */
@@ -156,12 +161,22 @@ public class BotInteractionService {
 
     /** 执行 Shell 命令并通过回调分段返回。 */
     public void executeShellCommand(String botType, String userId, String command, Consumer<String> callback) {
+        String userKey = userKey(botType, userId);
+        if (!resourceGovernor.allowBotMessage(userKey)) {
+            callback.accept("❌ 请求过于频繁，请稍后再试。");
+            return;
+        }
         sshManager.executeCommand(botType, userId, command, callback);
     }
 
     /** 异步执行 Shell 命令并返回完整输出。 */
     public java.util.concurrent.CompletableFuture<String> executeShellCommandAsync(String botType, String userId,
             String command) {
+        String userKey = userKey(botType, userId);
+        if (!resourceGovernor.allowBotMessage(userKey)) {
+            return java.util.concurrent.CompletableFuture.failedFuture(
+                    new IllegalStateException("请求过于频繁，请稍后再试。"));
+        }
         return sshManager.executeCommandAsync(botType, userId, command);
     }
 
@@ -176,14 +191,27 @@ public class BotInteractionService {
         if (prompt == null || prompt.isBlank()) {
             return new StartAiTaskResult(false, "提示词不能为空", null);
         }
+        if (isClaudeLoginShortcut(cliType, prompt)) {
+            return new StartAiTaskResult(false,
+                    "检测到登录指令。请先在 SSH 主机执行 `claude auth login` 完成授权，再回到 /claude 模式提问。",
+                    null);
+        }
 
         String userKey = userKey(botType, userId);
+        if (!resourceGovernor.allowBotMessage(userKey)) {
+            return new StartAiTaskResult(false, "请求过于频繁，请稍后再试。", null);
+        }
         if (aiCliExecutor.isRunning(cliType, userKey)) {
             return new StartAiTaskResult(false, "已有任务在运行", null);
+        }
+        UserResourceGovernor.Permit aiPermit = resourceGovernor.tryAcquireAiTask(userKey);
+        if (!aiPermit.granted()) {
+            return new StartAiTaskResult(false, "当前已有 AI 任务在运行，请等待结束后再试。", null);
         }
 
         BotSshSessionManager.SshConnection conn = sshManager.getConnection(botType, userId);
         if (conn == null) {
+            aiPermit.close();
             return new StartAiTaskResult(false, "未连接 SSH。请先使用 /connect 连接。", null);
         }
 
@@ -197,7 +225,7 @@ public class BotInteractionService {
         AiTaskState state = aiTaskStates.computeIfAbsent(stateKey, key -> new AiTaskState());
         state.start(prompt, workDir);
 
-        aiCliExecutor.executeRemote(cliType, userKey, prompt, workDir,
+        boolean accepted = aiCliExecutor.executeRemote(cliType, userKey, prompt, workDir,
                 command -> sshManager.startRemoteCommand(botType, userId, command),
                 chunk -> {
             state.append(chunk);
@@ -205,13 +233,31 @@ public class BotInteractionService {
                 outputCallback.accept(chunk);
             }
         }, () -> {
-            state.markCompleted();
-            if (onComplete != null) {
-                onComplete.run();
+            try {
+                state.markCompleted();
+                if (onComplete != null) {
+                    onComplete.run();
+                }
+            } finally {
+                aiPermit.close();
             }
         });
+        if (!accepted) {
+            aiPermit.close();
+            state.markStopped("❌ 系统繁忙，请稍后再试。");
+            return new StartAiTaskResult(false, "系统繁忙，请稍后再试。", null);
+        }
 
         return new StartAiTaskResult(true, "任务已启动", workDir);
+    }
+
+    /** Claude 模式下拦截误发的登录快捷词，避免被当作普通提示词执行。 */
+    private boolean isClaudeLoginShortcut(AiCliExecutor.CliType cliType, String prompt) {
+        if (cliType != AiCliExecutor.CliType.CLAUDE || prompt == null) {
+            return false;
+        }
+        String normalized = prompt.trim().toLowerCase(Locale.ROOT);
+        return "login".equals(normalized) || "/login".equals(normalized);
     }
 
     /** 停止 AI 任务，并向缓存中写入“已停止”提示。 */

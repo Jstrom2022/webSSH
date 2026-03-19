@@ -1,5 +1,7 @@
 package com.webssh.bot;
 
+import com.webssh.config.ResourceGovernanceProperties;
+import com.webssh.task.UserResourceGovernor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -27,9 +29,14 @@ class BotInteractionServiceTest {
     @Mock
     private AiCliExecutor aiCliExecutor;
 
+    private BotInteractionService newService() {
+        ResourceGovernanceProperties properties = new ResourceGovernanceProperties();
+        return new BotInteractionService(sshManager, aiCliExecutor, new UserResourceGovernor(properties));
+    }
+
     @Test
     void shouldCacheAiOutputAndExposeSnapshot() {
-        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        BotInteractionService service = newService();
         AtomicBoolean completed = new AtomicBoolean(false);
         BotSshSessionManager.SshConnection connection = org.mockito.Mockito
                 .mock(BotSshSessionManager.SshConnection.class);
@@ -43,7 +50,7 @@ class BotInteractionServiceTest {
             output.accept("🤖 第一段输出");
             output.accept("✅ Codex 任务已完成 (exit=0)");
             onComplete.run();
-            return null;
+            return true;
         }).when(aiCliExecutor).executeRemote(
                 eq(AiCliExecutor.CliType.CODEX),
                 eq("qq-official:user-1"),
@@ -78,7 +85,7 @@ class BotInteractionServiceTest {
 
     @Test
     void shouldRejectAiTaskWhenSshNotConnected() {
-        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        BotInteractionService service = newService();
         when(sshManager.getConnection("qq-official", "user-2")).thenReturn(null);
 
         BotInteractionService.StartAiTaskResult result = service.startAiTask(
@@ -96,8 +103,27 @@ class BotInteractionServiceTest {
     }
 
     @Test
+    void shouldRejectClaudeLoginShortcutPrompt() {
+        BotInteractionService service = newService();
+
+        BotInteractionService.StartAiTaskResult result = service.startAiTask(
+                "qq-official",
+                "user-3",
+                "/login",
+                AiCliExecutor.CliType.CLAUDE,
+                chunk -> {
+                },
+                null);
+
+        assertFalse(result.started());
+        assertTrue(result.message().contains("claude auth login"));
+        verify(sshManager, never()).getConnection(any(), any());
+        verify(aiCliExecutor, never()).executeRemote(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void shouldDisconnectAndStopAllTasksForBotType() {
-        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        BotInteractionService service = newService();
         service.enterAiMode("qq-official", "user-a", AiCliExecutor.CliType.CODEX);
         service.enterAiMode("telegram", "user-b", AiCliExecutor.CliType.CLAUDE);
 
@@ -111,7 +137,7 @@ class BotInteractionServiceTest {
 
     @Test
     void shouldReturnDisconnectedStatusWhenNoActiveConnection() {
-        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        BotInteractionService service = newService();
         when(sshManager.getConnection("telegram", "user-1")).thenReturn(null);
         service.enterAiMode("telegram", "user-1", AiCliExecutor.CliType.CODEX);
         assertTrue(service.isInAiMode("telegram", "user-1"));
@@ -126,7 +152,7 @@ class BotInteractionServiceTest {
 
     @Test
     void shouldEnterAndExitAiMode() {
-        BotInteractionService service = new BotInteractionService(sshManager, aiCliExecutor);
+        BotInteractionService service = newService();
 
         service.enterAiMode("telegram", "user-9", AiCliExecutor.CliType.CODEX);
         assertEquals(AiCliExecutor.CliType.CODEX, service.getAiMode("telegram", "user-9"));

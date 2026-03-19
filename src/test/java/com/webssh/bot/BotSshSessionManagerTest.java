@@ -2,9 +2,11 @@ package com.webssh.bot;
 
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.Session;
+import com.webssh.config.ResourceGovernanceProperties;
 import com.webssh.config.SshCompatibilityProperties;
 import com.webssh.session.SessionProfileStore;
 import com.webssh.session.SshSessionProfile;
+import com.webssh.task.UserResourceGovernor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -122,7 +124,11 @@ class BotSshSessionManagerTest {
         private TestableBotSshSessionManager(SessionProfileStore profileStore,
                 SshCompatibilityProperties sshProperties,
                 AiCliExecutor aiCliExecutor) {
-            super(profileStore, sshProperties, aiCliExecutor);
+            super(profileStore,
+                    sshProperties,
+                    aiCliExecutor,
+                    new ResourceGovernanceProperties(),
+                    new UserResourceGovernor(new ResourceGovernanceProperties()));
         }
 
         private void enqueueOpenedConnection(SshConnection connection) {
@@ -184,8 +190,10 @@ class BotSshSessionManagerTest {
         }
 
         @Override
-        public synchronized String readAvailableOutput(long initialDelayMs, long idleTimeoutMs) {
-            return output;
+        public synchronized BotSshSessionManager.CommandReadResult readAvailableOutput(long initialDelayMs,
+                long idleTimeoutMs,
+                long maxDurationMs) {
+            return new BotSshSessionManager.CommandReadResult(output, false);
         }
 
         @Override

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.webssh.config.ResourceGovernanceProperties;
 import com.webssh.config.SshCompatibilityProperties;
 import com.jcraft.jsch.ChannelShell;
 import com.jcraft.jsch.ChannelSftp;
@@ -12,6 +13,8 @@ import com.jcraft.jsch.JSch;
 import com.jcraft.jsch.Session;
 import com.jcraft.jsch.SftpATTRS;
 import com.jcraft.jsch.SftpException;
+import com.webssh.task.BoundedExecutorFactory;
+import com.webssh.task.UserResourceGovernor;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,12 +25,13 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.Principal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -35,7 +39,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
@@ -46,7 +49,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+
 
 /**
  * SSH WebSocket 核心处理器 —— 整个 WebSSH 系统的心脏。
@@ -89,14 +92,6 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     /** WebSocket 单条文本消息最大字节数：8MB，需与 WebSocketConfig 中的容器配置一致 */
     private static final int WS_TEXT_LIMIT_BYTES = 8 * 1024 * 1024;
 
-    /** SFTP 线程池核心线程数：至少 4 个，取 CPU 核心数和 4 的较大值 */
-    private static final int SFTP_CORE_THREADS = Math.max(4, Runtime.getRuntime().availableProcessors());
-
-    /** SFTP 线程池最大线程数：核心线程数的 2 倍 */
-    private static final int SFTP_MAX_THREADS = SFTP_CORE_THREADS * 2;
-
-    /** SFTP 线程池任务队列容量：超过此限制的任务会被拒绝，返回"系统繁忙"提示 */
-    private static final int SFTP_QUEUE_CAPACITY = 256;
 
     /** 最大并发 WebSocket 连接数，防止资源耗尽 */
     private static final int MAX_CONNECTIONS = 200;
@@ -113,18 +108,6 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     /** 当远端未提供 UTF-8 locale 时，默认兜底值 */
     private static final String DEFAULT_SHELL_UTF8_LOCALE = "en_US.UTF-8";
 
-    /**
-     * Shell 工作目录标记字节：STX (0x02) 和 ETX (0x03)。
-     * <p>
-     * 通过在 shell 中注入函数，让每次命令执行后输出 {@code \002__WEBSSH_CWD__:/path\003}，
-     * 从而在终端输出流中嵌入工作目录信息，前端据此同步 SFTP 面板路径。
-     * 这些控制字符在正常终端输出中几乎不会出现，因此作为定界符是安全的。
-     */
-    private static final byte SHELL_CWD_MARKER_START = 0x02;
-    private static final byte SHELL_CWD_MARKER_END = 0x03;
-
-    /** 工作目录标记前缀的 ASCII 字节序列 */
-    private static final byte[] SHELL_CWD_MARKER_PREFIX = "__WEBSSH_CWD__:".getBytes(StandardCharsets.US_ASCII);
 
     /**
      * 连接建立后注入到远端 shell 的初始化命令列表。
@@ -161,6 +144,8 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
     /** SSH 兼容性配置，控制是否允许旧版 ssh-rsa 算法 */
     private final SshCompatibilityProperties sshCompatibilityProperties;
+    /** 用户级资源配额守卫。 */
+    private final UserResourceGovernor resourceGovernor;
 
     /**
      * SFTP 通道任务的函数式接口，用于 {@link #withSharedSftp} 回调模式。
@@ -230,31 +215,16 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
      * @param sshCompatibilityProperties SSH 兼容性配置，注入自 Spring 容器
      */
     public SshWebSocketHandler(SshCompatibilityProperties sshCompatibilityProperties,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            ResourceGovernanceProperties resourceProperties,
+            UserResourceGovernor resourceGovernor) {
         this.sshCompatibilityProperties = sshCompatibilityProperties;
         this.objectMapper = objectMapper;
-        AtomicInteger sftpThreadCounter = new AtomicInteger(1);
-        this.sftpExecutor = new ThreadPoolExecutor(
-                SFTP_CORE_THREADS,
-                SFTP_MAX_THREADS,
-                60L,
-                TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(SFTP_QUEUE_CAPACITY),
-                r -> {
-                    Thread t = new Thread(r);
-                    t.setName("ssh-sftp-" + sftpThreadCounter.getAndIncrement());
-                    t.setDaemon(true);
-                    return t;
-                },
-                new ThreadPoolExecutor.AbortPolicy());
-        this.sftpExecutor.allowCoreThreadTimeOut(true);
-        AtomicInteger shellThreadCounter = new AtomicInteger(1);
-        this.shellOutputExecutor = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r);
-            t.setName("ssh-shell-output-" + shellThreadCounter.getAndIncrement());
-            t.setDaemon(true);
-            return t;
-        });
+        this.resourceGovernor = resourceGovernor;
+        this.sftpExecutor = BoundedExecutorFactory.newExecutor("ssh-sftp-",
+                resourceProperties.getSftp());
+        this.shellOutputExecutor = BoundedExecutorFactory.newExecutor("ssh-shell-output-",
+                resourceProperties.getShellOutput());
         this.cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "ssh-cleanup");
             t.setDaemon(true);
@@ -286,9 +256,10 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         session.setTextMessageSizeLimit(WS_TEXT_LIMIT_BYTES);
-        ClientConnection old = connections.put(session.getId(), new ClientConnection(session));
+        ClientConnection old = connections.put(session.getId(),
+                new ClientConnection(session, resolveWebUserKey(session)));
         if (old != null) {
-            old.close();
+            closeConnection(old);
         }
         sendInfo(session, "WebSocket 已连接，请发送 connect 消息建立 SSH 会话。");
     }
@@ -366,7 +337,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                 safeMessage(exception),
                 describeConnectionState(connection, session));
         if (connection != null) {
-            connection.close();
+            closeConnection(connection);
         }
     }
 
@@ -380,7 +351,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                 status == null ? "" : status.getReason(),
                 describeConnectionState(connection, session));
         if (connection != null) {
-            connection.close();
+            closeConnection(connection);
         }
     }
 
@@ -391,7 +362,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     @PreDestroy
     public void shutdown() {
         cleanupScheduler.shutdownNow();
-        connections.values().forEach(ClientConnection::close);
+        connections.values().forEach(this::closeConnection);
         shutdownExecutor(sftpExecutor);
         shutdownExecutor(shellOutputExecutor);
     }
@@ -405,6 +376,23 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         } catch (InterruptedException e) {
             executor.shutdownNow();
             Thread.currentThread().interrupt();
+        }
+    }
+
+    private String resolveWebUserKey(WebSocketSession session) {
+        if (session == null) {
+            return "ws:unknown";
+        }
+        Principal principal = session.getPrincipal();
+        if (principal != null && hasText(principal.getName())) {
+            return principal.getName();
+        }
+        return "ws:" + session.getId();
+    }
+
+    private void closeConnection(ClientConnection connection) {
+        if (connection != null) {
+            connection.close();
         }
     }
 
@@ -530,6 +518,12 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         InputStream outputReader = null;
         OutputStream inputWriter = null;
         boolean attached = false;
+        UserResourceGovernor.Permit shellPermit = resourceGovernor.tryAcquireWsShell(connection.userKey());
+        if (!shellPermit.granted()) {
+            sendError(connection.webSocketSession(), "当前登录用户打开的终端过多，请关闭部分终端后重试。");
+            return;
+        }
+        connection.setShellPermit(shellPermit);
 
         try {
             SshSessionConfig sessionConfig = new SshSessionConfig(
@@ -570,7 +564,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             attached = true;
             connection.armShellCwdSync();
             if (!submitShellOutputTask(connection, () -> pumpOutput(connection))) {
-                connection.close();
+                closeConnection(connection);
                 return;
             }
             installShellCwdSync(connection);
@@ -578,8 +572,9 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             sendPortForwardList(connection.webSocketSession(), null, connection.forwardsSnapshot());
         } catch (Exception e) {
             if (attached) {
-                connection.close();
+                closeConnection(connection);
             } else {
+                connection.releaseShellPermit();
                 closeQuietly(inputWriter);
                 closeQuietly(outputReader);
                 disconnectQuietly(channel);
@@ -610,7 +605,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         try {
             connection.write(data);
         } catch (IOException e) {
-            connection.close();
+            closeConnection(connection);
             sendError(connection.webSocketSession(), "写入失败: " + safeMessage(e));
             sendSimple(connection.webSocketSession(), "disconnected", "SSH 会话已断开。");
         }
@@ -635,7 +630,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
 
     /** 处理 "disconnect" 消息 —— 主动断开 SSH 连接并通知前端 */
     private void handleDisconnect(ClientConnection connection) {
-        connection.close();
+        closeConnection(connection);
         sendSimple(connection.webSocketSession(), "disconnected", "SSH 会话已断开。");
     }
 
@@ -1123,7 +1118,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
                         describeConnectionState(connection, webSocketSession));
             }
         } finally {
-            connection.close();
+            closeConnection(connection);
             sendSimple(webSocketSession, "disconnected", "SSH 会话已断开。");
         }
     }
@@ -1880,14 +1875,18 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
     private static final class ClientConnection {
         /** 前端 WebSocket 会话。 */
         private final WebSocketSession webSocketSession;
+        /** 当前 WebSocket 归属的登录用户。 */
+        private final String userKey;
         /** 串行化写入 SSH 输入流，防止并发 write 混乱。 */
         private final Object writeLock = new Object();
         /** 保护 sharedSftpClient 的生命周期操作。 */
         private final Object sftpLock = new Object();
         /** 过滤 shell 输出中的内部控制信息。 */
-        private final ShellOutputFilter shellOutputFilter = new ShellOutputFilter();
+        private final ShellOutputFilter shellOutputFilter = new ShellOutputFilter(SHELL_OUTPUT_BUFFER_LIMIT);
         /** 连接关闭标记，保证 close 幂等。 */
         private final AtomicBoolean closed = new AtomicBoolean(false);
+        /** 当前连接持有的 Shell 并发令牌。 */
+        private volatile UserResourceGovernor.Permit shellPermit = UserResourceGovernor.Permit.noop();
 
         private volatile Session sshSession;
         private volatile ChannelShell channel;
@@ -1899,13 +1898,28 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         private final ConcurrentMap<String, UploadContext> uploads = new ConcurrentHashMap<>();
         private final ConcurrentMap<String, DownloadState> downloads = new ConcurrentHashMap<>();
 
-        private ClientConnection(WebSocketSession webSocketSession) {
+        private ClientConnection(WebSocketSession webSocketSession, String userKey) {
             this.webSocketSession = webSocketSession;
+            this.userKey = userKey;
         }
 
         /** @return 当前 WebSocket 会话对象 */
         private WebSocketSession webSocketSession() {
             return webSocketSession;
+        }
+
+        private String userKey() {
+            return userKey;
+        }
+
+        private void setShellPermit(UserResourceGovernor.Permit shellPermit) {
+            this.shellPermit = shellPermit == null ? UserResourceGovernor.Permit.noop() : shellPermit;
+        }
+
+        private void releaseShellPermit() {
+            UserResourceGovernor.Permit permit = shellPermit;
+            shellPermit = UserResourceGovernor.Permit.noop();
+            permit.close();
         }
 
         /**
@@ -2091,6 +2105,7 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
+            releaseShellPermit();
             closeSharedSftp();
             closeUploads();
             closeDownloads();
@@ -2131,243 +2146,6 @@ public class SshWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    /**
-     * Shell 输出过滤结果 —— 包含过滤后的可见输出和提取到的工作目录路径。
-     *
-     * @see ShellOutputFilter#consume(byte[], int)
-     */
-    private static final class ShellOutputChunk {
-        private static final ShellOutputChunk EMPTY = new ShellOutputChunk(new byte[0], List.of());
-
-        private final byte[] visibleBytes;
-        private final List<String> cwdPaths;
-
-        private ShellOutputChunk(byte[] visibleBytes, List<String> cwdPaths) {
-            this.visibleBytes = visibleBytes;
-            this.cwdPaths = cwdPaths;
-        }
-
-        private byte[] visibleBytes() {
-            return visibleBytes;
-        }
-
-        private List<String> cwdPaths() {
-            return cwdPaths;
-        }
-    }
-
-    /**
-     * Shell 输出过滤器 —— 从终端原始输出中提取工作目录标记并过滤注入命令的回显。
-     *
-     * <p>
-     * 设计思路：
-     * <ul>
-     * <li>连接建立后会向 Shell 注入 CWD 追踪命令，这些命令的回显需要从输出中剥离</li>
-     * <li>Shell 每次执行命令后会输出 {@code \002__WEBSSH_CWD__:/path\003} 标记</li>
-     * <li>过滤器负责识别并提取这些标记，同时将其从用户可见输出中移除</li>
-     * </ul>
-     *
-     * <p>
-     * 使用内部缓冲区处理跨数据块边界的标记（标记可能被拆分到两次 read 调用中）。
-     */
-    private static final class ShellOutputFilter {
-        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        private final List<byte[]> pendingInitEchoLines = new ArrayList<>();
-
-        private void reset() {
-            buffer.reset();
-            pendingInitEchoLines.clear();
-        }
-
-        private void armInitialization(List<String> commands) {
-            reset();
-            for (String command : commands) {
-                pendingInitEchoLines.add(command.getBytes(StandardCharsets.UTF_8));
-            }
-        }
-
-        /**
-         * 消费一段 shell 输出并解析为“可见输出 + cwd 更新”。
-         * <p>
-         * 解析策略：
-         * 1) 在缓冲区中同时查找 cwd 标记与待过滤回显；
-         * 2) 将普通文本写入 visible；
-         * 3) 命中 cwd 标记时提取路径并从可见输出中移除；
-         * 4) 命中待过滤回显时整段跳过；
-         * 5) 末尾残留不完整片段回写 buffer，等待下一批数据拼接。
-         * </p>
-         */
-        private ShellOutputChunk consume(byte[] data, int len) {
-            if (len <= 0) {
-                return ShellOutputChunk.EMPTY;
-            }
-            buffer.write(data, 0, len);
-
-            if (buffer.size() > SHELL_OUTPUT_BUFFER_LIMIT) {
-                // 超限时直接降级为“不过滤透传”，并清空待过滤状态避免后续持续膨胀。
-                byte[] overflow = buffer.toByteArray();
-                buffer.reset();
-                pendingInitEchoLines.clear();
-                return new ShellOutputChunk(overflow, List.of());
-            }
-
-            byte[] current = buffer.toByteArray();
-            ByteArrayOutputStream visible = new ByteArrayOutputStream(current.length);
-            List<String> cwdPaths = new ArrayList<>();
-            int offset = 0;
-
-            while (offset < current.length) {
-                int nextMarker = indexOf(current, SHELL_CWD_MARKER_START, offset);
-                int nextEcho = nextPendingEchoPosition(current, offset);
-                int eventPos = earliestPositive(nextMarker, nextEcho);
-
-                if (eventPos < 0) {
-                    if (!pendingInitEchoLines.isEmpty()) {
-                        // 仍处于初始化过滤阶段时，仅输出到最后一个换行，避免半行被误判。
-                        int lastLineBreak = lastLineBreak(current, offset, current.length);
-                        if (lastLineBreak >= offset) {
-                            visible.write(current, offset, lastLineBreak + 1 - offset);
-                            offset = lastLineBreak + 1;
-                            continue;
-                        }
-                    } else {
-                        visible.write(current, offset, current.length - offset);
-                        offset = current.length;
-                    }
-                    break;
-                }
-
-                if (eventPos > offset) {
-                    if (eventPos == nextEcho) {
-                        int lastLineBreak = lastLineBreak(current, offset, eventPos);
-                        if (lastLineBreak >= offset) {
-                            visible.write(current, offset, lastLineBreak + 1 - offset);
-                        }
-                    } else {
-                        visible.write(current, offset, eventPos - offset);
-                    }
-                    offset = eventPos;
-                }
-
-                if (offset >= current.length) {
-                    break;
-                }
-
-                if (offset == nextEcho) {
-                    byte[] line = pendingInitEchoLines.get(0);
-                    if (!startsWith(current, offset, line)) {
-                        // 防御性处理：定位到疑似位置但不完整匹配时按普通字节透传。
-                        visible.write(current[offset]);
-                        offset += 1;
-                        continue;
-                    }
-                    offset += line.length;
-                    while (offset < current.length && (current[offset] == '\r' || current[offset] == '\n')) {
-                        offset += 1;
-                    }
-                    pendingInitEchoLines.remove(0);
-                    continue;
-                }
-
-                if (offset == nextMarker) {
-                    if (current.length < offset + 1 + SHELL_CWD_MARKER_PREFIX.length) {
-                        // marker 被拆包，保留到下次继续解析。
-                        break;
-                    }
-                    if (!startsWith(current, offset + 1, SHELL_CWD_MARKER_PREFIX)) {
-                        // 起始字节碰撞但非合法 marker，按普通字节处理。
-                        visible.write(current[offset]);
-                        offset += 1;
-                        continue;
-                    }
-                    int pathStart = offset + 1 + SHELL_CWD_MARKER_PREFIX.length;
-                    int pathEnd = indexOf(current, SHELL_CWD_MARKER_END, pathStart);
-                    if (pathEnd < 0) {
-                        break;
-                    }
-                    if (pathEnd > pathStart) {
-                        cwdPaths.add(new String(current, pathStart, pathEnd - pathStart, StandardCharsets.UTF_8));
-                    }
-                    offset = pathEnd + 1;
-                }
-            }
-
-            buffer.reset();
-            if (offset < current.length) {
-                // 保留尾部未消费片段（通常是不完整 marker 或回显行）。
-                buffer.write(current, offset, current.length - offset);
-            }
-            if (visible.size() == 0 && cwdPaths.isEmpty()) {
-                return ShellOutputChunk.EMPTY;
-            }
-            return new ShellOutputChunk(visible.toByteArray(), cwdPaths);
-        }
-
-        /** 查找下一条待过滤初始化回显在 data 中的位置。 */
-        private int nextPendingEchoPosition(byte[] data, int fromIndex) {
-            if (pendingInitEchoLines.isEmpty()) {
-                return -1;
-            }
-            return indexOf(data, pendingInitEchoLines.get(0), fromIndex);
-        }
-
-        /** 返回两个位置中最早的有效位置（忽略 -1）。 */
-        private static int earliestPositive(int a, int b) {
-            if (a < 0) {
-                return b;
-            }
-            if (b < 0) {
-                return a;
-            }
-            return Math.min(a, b);
-        }
-
-        /** 在指定区间逆向查找最后一个换行符位置。 */
-        private static int lastLineBreak(byte[] data, int fromInclusive, int toExclusive) {
-            for (int i = toExclusive - 1; i >= fromInclusive; i--) {
-                if (data[i] == '\n' || data[i] == '\r') {
-                    return i;
-                }
-            }
-            return -1;
-        }
-
-        /** 从 fromIndex 起查找某个字节。 */
-        private static int indexOf(byte[] data, byte value, int fromIndex) {
-            for (int i = Math.max(fromIndex, 0); i < data.length; i++) {
-                if (data[i] == value) {
-                    return i;
-                }
-            }
-            return -1;
-        }
-
-        /** 从 fromIndex 起查找字节模式。 */
-        private static int indexOf(byte[] data, byte[] pattern, int fromIndex) {
-            if (pattern.length == 0) {
-                return Math.max(fromIndex, 0);
-            }
-            for (int i = Math.max(fromIndex, 0); i <= data.length - pattern.length; i++) {
-                if (startsWith(data, i, pattern)) {
-                    return i;
-                }
-            }
-            return -1;
-        }
-
-        /** 判断从 offset 开始是否匹配给定字节模式。 */
-        private static boolean startsWith(byte[] data, int offset, byte[] pattern) {
-            if (offset < 0 || offset + pattern.length > data.length) {
-                return false;
-            }
-            for (int i = 0; i < pattern.length; i++) {
-                if (data[offset + i] != pattern[i]) {
-                    return false;
-                }
-            }
-            return true;
-        }
-    }
 
     /**
      * 下载流控状态 —— 用于实现 SFTP 下载的 ACK 流控机制。
