@@ -18,7 +18,7 @@ A browser-based SSH client built with Java Spring Boot + WebSocket. Features mul
 - **Internationalization** — 7 languages (简体中文, English, 日本語, 한국어, Deutsch, Français, Русский)
 - **Fullscreen Mode** — Toggle fullscreen terminal display
 - **Mobile Adaptability** — Responsive Web Design with optimized layouts, sidebar touch control, and file management interactions for mobile browsers
-- **Chatbot Integration** — Supports Telegram Bot and QQ Private Bot for managing SSH and AI programming tasks via messages
+- **Chatbot Integration** — Supports Telegram Bot, WeChat ClawBot (via iLink), and QQ Private Bot for managing SSH and AI programming tasks via messages
 
 ## Tech Stack
 
@@ -64,6 +64,8 @@ Frontend terminal dependencies are bundled as static resources:
 
 Config file: [application.properties](src/main/resources/application.properties)
 
+### Basic Configuration
+
 | Property | Default | Description |
 |----------|---------|-------------|
 | `webssh.auth.username` | `admin` | Login username |
@@ -71,7 +73,23 @@ Config file: [application.properties](src/main/resources/application.properties)
 | `webssh.session-store.directory` | `./data/sessions` | Session data storage directory |
 | `webssh.crypto.master-key` | `change-this-master-key-in-production` | Credential encryption master key |
 | `webssh.ssh.allow-legacy-ssh-rsa` | `true` | Allow legacy ssh-rsa algorithm |
+| `webssh.ssh.server-alive-interval-ms` | `30000` | SSH Keepalive interval (ms) |
 | `server.port` | `8080` | Server port |
+
+### Resource Management Configuration
+
+These settings are used to limit system resource consumption, preventing a single user or bot task from exhausting system resources.
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `webssh.resource.shell-output.max-size` | `128` | Max concurrent Shell output tasks |
+| `webssh.resource.bot-command.max-size` | `16` | Max concurrent bot command tasks |
+| `webssh.resource.ai-task.max-size` | `8` | Max concurrent AI programming tasks |
+| `webssh.resource.ws-shell-per-user` | `6` | Max concurrent SSH tabs per user |
+| `webssh.resource.bot-command-per-user` | `2` | Max concurrent bot commands per user |
+| `webssh.resource.ai-task-per-user` | `1` | Max concurrent AI tasks per user |
+| `webssh.resource.bot-command-timeout` | `30s` | Bot command execution timeout |
+| `webssh.resource.ai-task-timeout` | `15m` | AI task total execution timeout |
 
 > ⚠️ In production, always override the default credentials and encryption master key via environment variables or external configuration.
 
@@ -252,10 +270,11 @@ Endpoint: `/ws/ssh`
 
 - **Telegram Bot**: Uses Long Polling; no public callback URL required.
 - **QQ Private Bot**: Directly connects to the official OpenAPI + Gateway in the same way as the OpenClaw plugin. Currently supports private chat triggers.
+- **WeChat ClawBot**: Connects via the official WeChat iLink protocol. Supports QR code login; no public IP required.
 
 ### Bot Commands
 
-Both bots share the same core command set:
+All bots share the same core command set:
 
 - SSH: `/list`, `/connect`, `/disconnect`, `/status`
 - AI: `/codex [prompt]`, `/codex_stop`, `/codex_status`, `/codex_clear`
@@ -263,56 +282,36 @@ Both bots share the same core command set:
 
 `/codex` or `/claude` enters the corresponding AI mode. In AI mode, subsequent plain text is continuously handled by that AI until `codex_stop` / `codex_clear` / `claude_stop` / `claude_clear` is sent (with or without `/`). When AI mode is not enabled, plain text is executed as a Shell command after SSH is connected.
 
-### QQ Private Bot Notes
+### Application Guide
 
-- Enter `App ID` and `App Secret` in the management panel.
-- Currently, only **private chats** with the bot are supported, not group chats.
-- Uses the direct connection method (compatible with OpenClaw `qqbot` plugin): `AppID + AppSecret + Gateway WebSocket`.
-- **No callback URL configuration needed**.
-- A whitelist for "Allowed User IDs" can be configured; leave blank for no additional restrictions.
-- Due to QQ bot's rate-limiting on replies, SSH and AI terminal outputs use **aggregated replies**, unlike Telegram's continuous streaming.
-
-### Bot Configuration API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/bot-settings` | Get all bot providers and configurations |
-| `GET` | `/api/bot-settings/{type}` | Get configuration for a specific bot |
-| `POST` | `/api/bot-settings/{type}` | Save and apply configuration |
-| `GET` | `/api/bot-settings/{type}/status` | Get bot running status |
-| `POST` | `/api/bot-settings/{type}/restart` | Restart a specific bot |
-
-Currently built-in types:
-
-- `telegram`
-- `qq-official`
-
-## How to Apply for Bots
-
-### 1. Telegram Bot
+#### 1. Telegram Bot
 
 1. Search for `@BotFather` in Telegram.
-2. Send the `/newbot` command and follow the prompts to set the bot's display Name and a unique Username (must end in `bot`).
+2. Send the `/newbot` command and follow the prompts to set the bot's display Name and a unique Username.
 3. Once created, `BotFather` will provide an **API Token**.
 4. Enter this Token into the Telegram configuration section in the WebSSH management panel.
 
-### 2. QQ Official Bot
+#### 2. QQ Official Bot
 
 1. Log in to the [QQ Open Platform](https://q.qq.com/qqbot/openclaw/index.html).
-2. Apply for an openClaws bot.
+2. Apply for an AppID and AppSecret.
+3. Enter these credentials into the WebSSH management panel. Interact with the bot via private chat once enabled.
 
-![QQ Bot Registration](./img/0dc7cd58-8264-4ab4-a106-323aaf9f5dfa.png)
+#### 3. WeChat ClawBot
 
-3. Navigate to the bot management page and obtain the **AppID** and **AppSecret** (ClientSecret) under "Development Settings".
-4. Enter these credentials into the WebSSH management panel.
-5. **How to get User ID**:
-    - Start a private chat with your bot after enabling it in the management panel.
-    - Once the bot connects successfully, your UserID (usually an encrypted string) will appear in the WebSSH backend logs (console or `nohup.out`).
-    - Add your UserID to the "Allowed User IDs" whitelist for security.
-6. **Notes**:
-    - Uses direct connection (AppID + AppSecret + Gateway WebSocket); **no callback URL is required**.
-    - Ensure "Direct Message" (私信) is enabled in the development settings.
-    - Make sure the bot is "Online" or in "Development mode".
+This method uses the official WeChat iLink platform for a simple setup.
+
+1. Locate the **WeChat ClawBot** card in the WebSSH management panel.
+2. Click **Scan to Get Token**.
+3. A QR code will appear; scan it with WeChat and confirm (if this is your first time, you may need to scan twice: once to establish a connection and once to authorize).
+4. After confirmation, the `Bot Token` will be automatically captured and filled into the form.
+5. Check "Enable Bot" and click "Save and Apply".
+
+### Tips
+
+- **User Isolation**: Configure your personal account ID in "Allowed User IDs" to prevent unauthorized use.
+- **Associate User**: Each bot configuration has an "Associated WebSSH User"; this bot will be able to access and manage all SSH sessions under that user.
+- **Aggregated Replies**: Due to strict rate-limiting on QQ and WeChat, bot outputs for SSH or AI may be aggregated into single messages to avoid being blocked.
 
 ## SFTP Notes
 

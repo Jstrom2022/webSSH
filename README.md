@@ -64,6 +64,8 @@
 
 配置文件：[application.properties](src/main/resources/application.properties)
 
+### 基础配置
+
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
 | `webssh.auth.username` | `admin` | 登录用户名 |
@@ -71,7 +73,23 @@
 | `webssh.session-store.directory` | `./data/sessions` | 会话数据存储目录 |
 | `webssh.crypto.master-key` | `change-this-master-key-in-production` | 凭据加密主密钥 |
 | `webssh.ssh.allow-legacy-ssh-rsa` | `true` | 是否允许旧版 ssh-rsa 算法 |
+| `webssh.ssh.server-alive-interval-ms` | `30000` | SSH Keepalive 间隔（毫秒） |
 | `server.port` | `8080` | 服务端口 |
+
+### 资源治理配置
+
+这些配置用于限制系统资源消耗，防止单个用户或机器人任务占满系统资源。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `webssh.resource.shell-output.max-size` | `128` | 最大并发 Shell 输出任务数 |
+| `webssh.resource.bot-command.max-size` | `16` | 最大并发机器人命令任务数 |
+| `webssh.resource.ai-task.max-size` | `8` | 最大并发 AI 编程任务数 |
+| `webssh.resource.ws-shell-per-user` | `6` | 每用户最大并发 SSH 标签页 |
+| `webssh.resource.bot-command-per-user` | `2` | 每用户最大并发机器人指令 |
+| `webssh.resource.ai-task-per-user` | `1` | 每用户最大并发 AI 任务 |
+| `webssh.resource.bot-command-timeout` | `30s` | 机器人普通命令执行超时 |
+| `webssh.resource.ai-task-timeout` | `15m` | AI 编程任务总执行超时 |
 
 > ⚠️ 生产环境务必通过环境变量或外部配置覆盖默认账户密码和加密主密钥。
 
