@@ -2871,6 +2871,89 @@ const BOT_UI_CONFIGS = {
                 allowedUserIds: allowedUserIds
             };
         }
+    },
+    "wechat": {
+        type: "wechat",
+        saveButtonId: "wechatSaveBtn",
+        restartButtonId: "wechatRestartBtn",
+        badgeId: "wechatRunningBadge",
+        indicatorId: "wechatStatusIndicator",
+        statusTextId: "wechatStatusText",
+        fill(settings) {
+            const config = settings.config || {};
+            const tokenEl = document.getElementById("wechatChannelToken");
+            const jwtEl = document.getElementById("wechatJwtToken");
+            const usersEl = document.getElementById("wechatAllowedUsers");
+            const enabledEl = document.getElementById("wechatEnabled");
+
+            if (tokenEl) tokenEl.value = config.channelToken || "";
+            if (jwtEl) jwtEl.value = config.jwtToken || "";
+            const sshUsernameEl = document.getElementById("wechatSshUsername");
+            if (sshUsernameEl) sshUsernameEl.value = settings.sshUsername || "admin";
+            if (usersEl) usersEl.value = (settings.allowedUserIds || []).join("\n");
+            if (enabledEl) enabledEl.checked = settings.enabled || false;
+        },
+        buildPayload() {
+            const channelToken = (document.getElementById("wechatChannelToken")?.value || "").trim();
+            const jwtToken = (document.getElementById("wechatJwtToken")?.value || "").trim();
+            const enabled = document.getElementById("wechatEnabled")?.checked || false;
+            const allowedUserIds = parseTextareaLines(document.getElementById("wechatAllowedUsers")?.value);
+
+            if (enabled && !channelToken) {
+                throw new Error("启用微信 ClawBot 之前请填写 Channel Token");
+            }
+
+            const sshUsername = (document.getElementById("wechatSshUsername")?.value || "admin").trim();
+
+            return {
+                type: "wechat",
+                enabled: enabled,
+                sshUsername: sshUsername,
+                config: {
+                    channelToken: channelToken,
+                    jwtToken: jwtToken || undefined
+                },
+                allowedUserIds: allowedUserIds
+            };
+        }
+    },
+    "weixin-clawbot": {
+        type: "weixin-clawbot",
+        saveButtonId: "weixinCbSaveBtn",
+        restartButtonId: "weixinCbRestartBtn",
+        badgeId: "weixinCbRunningBadge",
+        indicatorId: "weixinCbStatusIndicator",
+        statusTextId: "weixinCbStatusText",
+        fill(settings) {
+            const config = settings.config || {};
+            const tokenEl = document.getElementById("weixinCbBotToken");
+            const baseUrlEl = document.getElementById("weixinCbBaseUrl");
+            const sshEl = document.getElementById("weixinCbSshUsername");
+            const usersEl = document.getElementById("weixinCbAllowedUsers");
+            const enabledEl = document.getElementById("weixinCbEnabled");
+            if (tokenEl) tokenEl.value = config.botToken || "";
+            if (baseUrlEl) baseUrlEl.value = config.baseUrl || "";
+            if (sshEl) sshEl.value = settings.sshUsername || "admin";
+            if (usersEl) usersEl.value = (settings.allowedUserIds || []).join("\n");
+            if (enabledEl) enabledEl.checked = settings.enabled || false;
+        },
+        buildPayload() {
+            const botToken = (document.getElementById("weixinCbBotToken")?.value || "").trim();
+            const baseUrl = (document.getElementById("weixinCbBaseUrl")?.value || "").trim();
+            const enabled = document.getElementById("weixinCbEnabled")?.checked || false;
+            const sshUsername = (document.getElementById("weixinCbSshUsername")?.value || "admin").trim();
+            const allowedUserIds = parseTextareaLines(document.getElementById("weixinCbAllowedUsers")?.value);
+            if (enabled && !botToken) {
+                throw new Error("启用微信 ClawBot 之前请先扫码获取 Bot Token");
+            }
+            return {
+                type: "weixin-clawbot",
+                enabled,
+                sshUsername,
+                config: { botToken, ...(baseUrl ? { baseUrl } : {}) },
+                allowedUserIds
+            };
+        }
     }
 };
 
@@ -2904,6 +2987,18 @@ function initBotSettings() {
             restartBtn.addEventListener("click", () => restartBot(config));
         }
     });
+
+    // 微信扫码登录按钮
+    const qrLoginBtn = document.getElementById("wechatQrLoginBtn");
+    if (qrLoginBtn) {
+        qrLoginBtn.addEventListener("click", startWechatQrLogin);
+    }
+
+    // 微信 ClawBot (iLink) 扫码按钮
+    const cbQrBtn = document.getElementById("weixinCbQrLoginBtn");
+    if (cbQrBtn) {
+        cbQrBtn.addEventListener("click", startWeixinCbQrLogin);
+    }
 
     // 初始加载状态
     loadAllBotStatuses();
@@ -3042,3 +3137,237 @@ function updateBotTriggerDot(anyRunning) {
         dot.classList.toggle("running", anyRunning);
     }
 }
+
+// ==================== 微信扫码登录 ====================
+
+async function startWechatQrLogin() {
+    const modal = document.getElementById("wechatQrModal");
+    const canvas = document.getElementById("qrCanvas");
+    const loading = document.getElementById("qrLoading");
+    const errorDiv = document.getElementById("qrError");
+    const step2 = document.getElementById("qrStep2");
+    const scanHint = document.getElementById("qrScanHint");
+    const fallbackLink = document.getElementById("qrFallbackLink");
+    const callbackInput = document.getElementById("qrCallbackUrl");
+    const statusDiv = document.getElementById("qrExchangeStatus");
+
+    // 重置状态
+    modal.style.display = "flex";
+    canvas.style.display = "none";
+    loading.style.display = "flex";
+    errorDiv.style.display = "none";
+    step2.style.display = "none";
+    scanHint.style.display = "none";
+    fallbackLink.style.display = "none";
+    if (callbackInput) callbackInput.value = "";
+    if (statusDiv) { statusDiv.style.display = "none"; statusDiv.textContent = ""; }
+
+    try {
+        const resp = await fetch("/api/wechat-login/qr-url", { method: "POST" });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.message || "获取二维码失败");
+
+        modal.dataset.guid = data.guid;
+        modal.dataset.state = data.state;
+
+        loading.style.display = "none";
+
+        // QR 库加载失败容错
+        if (typeof QRCode === "undefined") {
+            fallbackLink.href = data.qrUrl;
+            fallbackLink.style.display = "inline";
+            fallbackLink.textContent = "QR库未加载，点击在浏览器中打开扫码页面";
+        } else {
+            canvas.style.display = "block";
+            canvas.innerHTML = "";
+            new QRCode(canvas, {
+                text: data.qrUrl,
+                width: 256, height: 256,
+                colorDark: "#000000", colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.L
+            });
+            fallbackLink.href = data.qrUrl;
+            fallbackLink.style.display = "inline";
+            fallbackLink.textContent = "在浏览器中打开";
+        }
+
+        scanHint.style.display = "block";
+        step2.style.display = "block";
+    } catch (e) {
+        loading.style.display = "none";
+        errorDiv.style.display = "block";
+        errorDiv.textContent = "获取二维码失败: " + e.message;
+    }
+}
+
+// 关闭 modal
+document.getElementById("qrModalCloseBtn")?.addEventListener("click", () => {
+    document.getElementById("wechatQrModal").style.display = "none";
+});
+document.getElementById("wechatQrModal")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.style.display = "none";
+});
+
+// 获取 Token
+document.getElementById("qrExchangeBtn")?.addEventListener("click", async () => {
+    const modal = document.getElementById("wechatQrModal");
+    const urlInput = document.getElementById("qrCallbackUrl");
+    const btn = document.getElementById("qrExchangeBtn");
+    const statusDiv = document.getElementById("qrExchangeStatus");
+    const rawUrl = (urlInput?.value || "").trim();
+
+    if (!rawUrl) { alert("请粘贴微信扫码后跳转的完整 URL"); return; }
+
+    let code;
+    try {
+        const url = new URL(rawUrl);
+        code = url.searchParams.get("code");
+    } catch {
+        alert("URL 格式不正确，请粘贴完整的跳转地址");
+        return;
+    }
+    if (!code) { alert("URL 中未包含 code 参数，请确认已完成微信扫码授权"); return; }
+
+    const guid = modal.dataset.guid;
+    const state = modal.dataset.state;
+
+    try {
+        btn.disabled = true;
+        btn.querySelector("span").textContent = "获取中...";
+        statusDiv.style.display = "block";
+        statusDiv.textContent = "正在换取 Token...";
+        statusDiv.style.color = "var(--text-secondary)";
+
+        const resp = await fetch("/api/wechat-login/exchange", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ guid, code, state })
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.message || "换取 Token 失败");
+
+        // 自动填入表单
+        const tokenEl = document.getElementById("wechatChannelToken");
+        const jwtEl = document.getElementById("wechatJwtToken");
+        if (tokenEl && data.channelToken) tokenEl.value = data.channelToken;
+        if (jwtEl && data.jwtToken) jwtEl.value = data.jwtToken;
+
+        statusDiv.textContent = "Token 获取成功，已自动填入表单";
+        statusDiv.style.color = "var(--accent-green, #4ade80)";
+
+        setTimeout(() => { modal.style.display = "none"; }, 1500);
+    } catch (e) {
+        statusDiv.textContent = "失败: " + e.message;
+        statusDiv.style.color = "var(--accent-red, #f87171)";
+    } finally {
+        btn.disabled = false;
+        btn.querySelector("span").textContent = "获取 Token";
+    }
+});
+
+// ==================== 微信 ClawBot (iLink) 扫码登录 ====================
+
+let weixinCbPollTimer = null;
+
+async function startWeixinCbQrLogin() {
+    const modal = document.getElementById("wechatQrModal");
+    const canvas = document.getElementById("qrCanvas");
+    const loading = document.getElementById("qrLoading");
+    const errorDiv = document.getElementById("qrError");
+    const step2 = document.getElementById("qrStep2");
+    const scanHint = document.getElementById("qrScanHint");
+    const fallbackLink = document.getElementById("qrFallbackLink");
+    const callbackInput = document.getElementById("qrCallbackUrl");
+    const statusDiv = document.getElementById("qrExchangeStatus");
+    const exchangeBtn = document.getElementById("qrExchangeBtn");
+
+    if (weixinCbPollTimer) { clearInterval(weixinCbPollTimer); weixinCbPollTimer = null; }
+
+    modal.style.display = "flex";
+    canvas.style.display = "none";
+    loading.style.display = "flex";
+    loading.querySelector("span").textContent = "正在获取登录二维码...";
+    errorDiv.style.display = "none";
+    step2.style.display = "none";
+    scanHint.style.display = "none";
+    fallbackLink.style.display = "none";
+    if (exchangeBtn) exchangeBtn.style.display = "none";
+    if (callbackInput) callbackInput.parentElement.style.display = "none";
+    if (statusDiv) { statusDiv.style.display = "block"; statusDiv.textContent = ""; }
+
+    const baseUrl = (document.getElementById("weixinCbBaseUrl")?.value || "").trim();
+
+    try {
+        const resp = await fetch("/api/weixin-clawbot-login/qr-start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(baseUrl ? { baseUrl } : {})
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.message || "获取二维码失败");
+
+        loading.style.display = "none";
+
+        if (typeof QRCode !== "undefined") {
+            canvas.style.display = "block";
+            canvas.innerHTML = "";
+            new QRCode(canvas, {
+                text: data.qrcodeUrl,
+                width: 256, height: 256,
+                colorDark: "#000000", colorLight: "#ffffff",
+                correctLevel: QRCode.CorrectLevel.L
+            });
+        } else {
+            fallbackLink.href = data.qrcodeUrl;
+            fallbackLink.style.display = "inline";
+            fallbackLink.textContent = "QR库未加载，点击打开";
+        }
+
+        scanHint.style.display = "block";
+        scanHint.textContent = "请使用微信扫描上方二维码";
+        step2.style.display = "block";
+        statusDiv.style.display = "block";
+        statusDiv.textContent = "等待扫码...";
+        statusDiv.style.color = "var(--text-secondary)";
+
+        const sessionId = data.sessionId;
+        weixinCbPollTimer = setInterval(async () => {
+            try {
+                const pr = await fetch("/api/weixin-clawbot-login/qr-poll", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ sessionId })
+                });
+                const pd = await pr.json();
+                if (!pd.success && pd.status === "expired") {
+                    clearInterval(weixinCbPollTimer); weixinCbPollTimer = null;
+                    statusDiv.textContent = "二维码已过期，请关闭后重试";
+                    statusDiv.style.color = "var(--accent-red, #f87171)";
+                    return;
+                }
+                if (pd.status === "scaned") {
+                    statusDiv.textContent = "已扫码，请在微信中确认...";
+                    statusDiv.style.color = "var(--theme-accent)";
+                } else if (pd.status === "confirmed") {
+                    clearInterval(weixinCbPollTimer); weixinCbPollTimer = null;
+                    const tokenEl = document.getElementById("weixinCbBotToken");
+                    const baseUrlEl = document.getElementById("weixinCbBaseUrl");
+                    if (tokenEl && pd.botToken) tokenEl.value = pd.botToken;
+                    if (baseUrlEl && pd.baseUrl) baseUrlEl.value = pd.baseUrl;
+                    statusDiv.textContent = "Token 获取成功，已自动填入！";
+                    statusDiv.style.color = "var(--accent-green, #4ade80)";
+                    setTimeout(() => { modal.style.display = "none"; }, 1500);
+                }
+            } catch { /* 轮询错误静默 */ }
+        }, 2500);
+    } catch (e) {
+        loading.style.display = "none";
+        errorDiv.style.display = "block";
+        errorDiv.textContent = "获取二维码失败: " + e.message;
+    }
+}
+
+// 关闭 modal 时清理 iLink 轮询
+document.getElementById("qrModalCloseBtn")?.addEventListener("click", () => {
+    if (weixinCbPollTimer) { clearInterval(weixinCbPollTimer); weixinCbPollTimer = null; }
+});

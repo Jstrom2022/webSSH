@@ -46,6 +46,12 @@ public class ResourceGovernanceProperties {
             16,
             128);
 
+    /** 微信 ClawBot 事件处理线程池。 */
+    private ExecutorPool wechatEvent = new ExecutorPool(
+            2,
+            16,
+            128);
+
     /** 单个登录用户允许同时持有的 WebSocket Shell 数量。 */
     private int wsShellPerUser = 6;
 
@@ -58,6 +64,9 @@ public class ResourceGovernanceProperties {
     /** 单个 QQ 用户允许同时占用的事件处理任务数量。 */
     private int qqEventPerUser = 2;
 
+    /** 单个微信用户允许同时占用的事件处理任务数量。 */
+    private int wechatEventPerUser = 2;
+
     /** 单个 Bot 用户在速率窗口内允许提交的命令/提示词数量。 */
     private int botMessageRateLimit = 8;
 
@@ -69,6 +78,12 @@ public class ResourceGovernanceProperties {
 
     /** QQ 用户消息速率窗口。 */
     private Duration qqMessageRateWindow = Duration.ofSeconds(10);
+
+    /** 单个微信用户在速率窗口内允许提交的消息数量。 */
+    private int wechatMessageRateLimit = 6;
+
+    /** 微信用户消息速率窗口。 */
+    private Duration wechatMessageRateWindow = Duration.ofSeconds(10);
 
     /** Bot 普通 Shell 命令的最大执行时长。 */
     private Duration botCommandTimeout = Duration.ofSeconds(30);
@@ -116,6 +131,14 @@ public class ResourceGovernanceProperties {
         this.qqEvent = qqEvent;
     }
 
+    public ExecutorPool getWechatEvent() {
+        return wechatEvent;
+    }
+
+    public void setWechatEvent(ExecutorPool wechatEvent) {
+        this.wechatEvent = wechatEvent;
+    }
+
     public int getWsShellPerUser() {
         return wsShellPerUser;
     }
@@ -148,6 +171,14 @@ public class ResourceGovernanceProperties {
         this.qqEventPerUser = qqEventPerUser;
     }
 
+    public int getWechatEventPerUser() {
+        return wechatEventPerUser;
+    }
+
+    public void setWechatEventPerUser(int wechatEventPerUser) {
+        this.wechatEventPerUser = wechatEventPerUser;
+    }
+
     public int getBotMessageRateLimit() {
         return botMessageRateLimit;
     }
@@ -178,6 +209,22 @@ public class ResourceGovernanceProperties {
 
     public void setQqMessageRateWindow(Duration qqMessageRateWindow) {
         this.qqMessageRateWindow = qqMessageRateWindow;
+    }
+
+    public int getWechatMessageRateLimit() {
+        return wechatMessageRateLimit;
+    }
+
+    public void setWechatMessageRateLimit(int wechatMessageRateLimit) {
+        this.wechatMessageRateLimit = wechatMessageRateLimit;
+    }
+
+    public Duration getWechatMessageRateWindow() {
+        return wechatMessageRateWindow;
+    }
+
+    public void setWechatMessageRateWindow(Duration wechatMessageRateWindow) {
+        this.wechatMessageRateWindow = wechatMessageRateWindow;
     }
 
     public Duration getBotCommandTimeout() {

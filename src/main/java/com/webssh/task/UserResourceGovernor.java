@@ -43,6 +43,10 @@ public class UserResourceGovernor {
         return tryAcquire("qq-event", userKey, properties.getQqEventPerUser());
     }
 
+    public Permit tryAcquireWechatEvent(String userKey) {
+        return tryAcquire("wechat-event", userKey, properties.getWechatEventPerUser());
+    }
+
     public boolean allowBotMessage(String userKey) {
         return tryConsume("bot-message", userKey,
                 properties.getBotMessageRateLimit(),
@@ -53,6 +57,12 @@ public class UserResourceGovernor {
         return tryConsume("qq-message", userKey,
                 properties.getQqMessageRateLimit(),
                 properties.getQqMessageRateWindow().toMillis());
+    }
+
+    public boolean allowWechatMessage(String userKey) {
+        return tryConsume("wechat-message", userKey,
+                properties.getWechatMessageRateLimit(),
+                properties.getWechatMessageRateWindow().toMillis());
     }
 
     private Permit tryAcquire(String resourceType, String userKey, int maxConcurrent) {
