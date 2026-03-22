@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Telegram 机器人提供者 — 实现 {@link ChatBotProvider} 的 Telegram 版本。
@@ -149,6 +151,15 @@ public class TelegramBotProvider implements ChatBotProvider {
     private class InternalBot extends TelegramLongPollingBot {
 
         private static final int MAX_MESSAGE_LENGTH = 4000;
+
+        // Markdown → HTML 转换用正则
+        private static final Pattern MD_CODE_FENCE = Pattern.compile("^```\\w*$", Pattern.MULTILINE);
+        private static final Pattern MD_HEADING = Pattern.compile("^(#{1,6})\\s+(.+?)\\s*$", Pattern.MULTILINE);
+        private static final Pattern MD_BOLD = Pattern.compile("\\*\\*([^*\\n]+?)\\*\\*");
+        private static final Pattern MD_ITALIC = Pattern.compile("(?<!\\*)\\*([^*\\n]+?)\\*(?!\\*)");
+        private static final Pattern MD_INLINE_CODE = Pattern.compile("`([^`\\n]+?)`");
+        private static final Pattern MD_LINK = Pattern.compile("!?\\[([^\\]]+)]\\(([^)\\n]+)\\)");
+
         private final String botUsername;
         private final Set<String> allowedUsers;
         private final String sshUsername;
@@ -383,8 +394,7 @@ public class TelegramBotProvider implements ChatBotProvider {
             }
 
             BotInteractionService.StartAiTaskResult result = interactionService.startAiTask(TYPE, userId, prompt, cliType,
-                    // AI 输出内容不可控，可能包含 Telegram Markdown 非法片段；统一按纯文本发送更稳妥。
-                    output -> sendText(chatId, output, false),
+                    output -> sendText(chatId, convertToTelegramHtml(output), "HTML"),
                     () -> log.debug("{} 任务结束 [{}:{}]", name, TYPE, userId));
             if (!result.started()) {
                 sendText(chatId, "❌ " + result.message());
@@ -432,7 +442,7 @@ public class TelegramBotProvider implements ChatBotProvider {
         }
 
         private void sendText(long chatId, String text) {
-            sendText(chatId, text, false);
+            sendText(chatId, text, (String) null);
         }
 
         /**
@@ -442,16 +452,23 @@ public class TelegramBotProvider implements ChatBotProvider {
          * </p>
          */
         private void sendText(long chatId, String text, boolean markdown) {
+            sendText(chatId, text, markdown ? "Markdown" : null);
+        }
+
+        /**
+         * 发送消息到 Telegram，指定 parseMode（"Markdown"、"HTML" 或 null）。
+         */
+        private void sendText(long chatId, String text, String parseMode) {
             List<String> chunks = splitForTelegram(text);
             for (String chunk : chunks) {
                 try {
-                    sendChunk(chatId, chunk, markdown);
+                    sendChunk(chatId, chunk, parseMode);
                 } catch (TelegramApiException e) {
                     log.error("发送 Telegram 消息分片失败: {}", e.getMessage(), e);
-                    // Markdown 失败时仅回退当前分片，避免整段超长重发再次失败。
-                    if (markdown) {
+                    // 格式解析失败时仅回退当前分片，避免整段超长重发再次失败。
+                    if (parseMode != null) {
                         try {
-                            sendChunk(chatId, chunk, false);
+                            sendChunk(chatId, chunk, null);
                         } catch (TelegramApiException fallbackError) {
                             log.error("发送 Telegram 消息纯文本兜底失败: {}", fallbackError.getMessage(), fallbackError);
                         }
@@ -464,11 +481,16 @@ public class TelegramBotProvider implements ChatBotProvider {
 
         /** 发送单个 Telegram 消息分片。 */
         private void sendChunk(long chatId, String chunk, boolean markdown) throws TelegramApiException {
+            sendChunk(chatId, chunk, markdown ? "Markdown" : null);
+        }
+
+        /** 发送单个 Telegram 消息分片，指定 parseMode。 */
+        private void sendChunk(long chatId, String chunk, String parseMode) throws TelegramApiException {
             SendMessage msg = new SendMessage();
             msg.setChatId(String.valueOf(chatId));
             msg.setText(chunk);
-            if (markdown) {
-                msg.setParseMode("Markdown");
+            if (parseMode != null) {
+                msg.setParseMode(parseMode);
             }
             msg.setDisableWebPagePreview(true);
             execute(msg);
@@ -504,6 +526,96 @@ public class TelegramBotProvider implements ChatBotProvider {
                 }
             }
             return parts;
+        }
+
+        /**
+         * 将标准 Markdown 转为 Telegram HTML，使 AI 输出在聊天中获得富文本渲染。
+         * <p>
+         * 处理代码块、标题、粗体、斜体、行内代码和链接；其余文本转义 HTML 实体。
+         * </p>
+         */
+        private static String convertToTelegramHtml(String text) {
+            if (text == null || text.isBlank()) {
+                return text;
+            }
+
+            String[] lines = text.replace("\r\n", "\n").split("\n", -1);
+            StringBuilder sb = new StringBuilder();
+            boolean inCodeBlock = false;
+
+            for (int i = 0; i < lines.length; i++) {
+                String line = lines[i];
+                String trimmed = line.trim();
+
+                // 代码围栏开关
+                if (MD_CODE_FENCE.matcher(trimmed).matches()) {
+                    if (!inCodeBlock) {
+                        inCodeBlock = true;
+                        sb.append("<pre>");
+                    } else {
+                        inCodeBlock = false;
+                        sb.append("</pre>");
+                    }
+                    if (i < lines.length - 1) {
+                        sb.append('\n');
+                    }
+                    continue;
+                }
+
+                if (inCodeBlock) {
+                    // 代码块内仅做 HTML 实体转义
+                    sb.append(escapeHtml(line));
+                    if (i < lines.length - 1) {
+                        sb.append('\n');
+                    }
+                    continue;
+                }
+
+                // 标题 → 粗体
+                Matcher heading = MD_HEADING.matcher(trimmed);
+                if (heading.matches()) {
+                    sb.append("<b>").append(escapeHtml(heading.group(2))).append("</b>");
+                    if (i < lines.length - 1) {
+                        sb.append('\n');
+                    }
+                    continue;
+                }
+
+                // 行内元素转换：先转义 HTML，再替换 Markdown 语法
+                String converted = escapeHtml(line);
+                // 粗体 **text** → <b>text</b>
+                converted = MD_BOLD.matcher(converted).replaceAll("<b>$1</b>");
+                // 斜体 *text* → <i>text</i>
+                converted = MD_ITALIC.matcher(converted).replaceAll("<i>$1</i>");
+                // 行内代码 `code` → <code>code</code>
+                converted = MD_INLINE_CODE.matcher(converted).replaceAll("<code>$1</code>");
+                // 链接 [text](url) → <a href="url">text</a>；图片 ![alt](url) → alt
+                converted = MD_LINK.matcher(converted).replaceAll(match -> {
+                    if (match.group(0).startsWith("!")) {
+                        return match.group(1);
+                    }
+                    return "<a href=\"" + match.group(2) + "\">" + match.group(1) + "</a>";
+                });
+
+                sb.append(converted);
+                if (i < lines.length - 1) {
+                    sb.append('\n');
+                }
+            }
+
+            // 未闭合的代码块自动补上
+            if (inCodeBlock) {
+                sb.append("</pre>");
+            }
+            return sb.toString();
+        }
+
+        /** HTML 实体转义。 */
+        private static String escapeHtml(String text) {
+            if (text == null) return "";
+            return text.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;");
         }
 
         /** 转义 Telegram Markdown 保留字符，避免消息渲染失败。 */

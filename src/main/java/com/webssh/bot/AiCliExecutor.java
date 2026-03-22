@@ -113,6 +113,8 @@ public class AiCliExecutor {
     private final ConcurrentMap<String, String> userSessionIds = new ConcurrentHashMap<>();
     /** 记录最近一次 Claude assistant 文本，用于 result 事件去重。 */
     private final ConcurrentMap<String, String> lastClaudeAssistantTexts = new ConcurrentHashMap<>();
+    /** Codex 流式输出已发送字符数，用于 item.updated 增量推送。 */
+    private final ConcurrentMap<String, Integer> codexStreamedLengths = new ConcurrentHashMap<>();
     /** 启动后缓存的 CLI 可执行路径，key = cliType。 */
     private final ConcurrentMap<CliType, String> resolvedBins = new ConcurrentHashMap<>();
     /** AI 任务治理配置。 */
@@ -168,6 +170,7 @@ public class AiCliExecutor {
             Consumer<String> outputCallback, Runnable onComplete) {
         String processKey = processKey(cliType, userKey);
         lastClaudeAssistantTexts.remove(processKey);
+        codexStreamedLengths.remove(processKey);
         // 如果已有任务在运行，先停止
         stop(cliType, userKey);
 
@@ -241,6 +244,7 @@ public class AiCliExecutor {
                     cancelTimeout(timeoutFuture);
                     runningProcesses.remove(processKey);
                     lastClaudeAssistantTexts.remove(processKey);
+                    codexStreamedLengths.remove(processKey);
                     if (process != null && process.isAlive()) {
                         process.destroyForcibly();
                     }
@@ -270,6 +274,7 @@ public class AiCliExecutor {
             Consumer<String> outputCallback, Runnable onComplete) {
         String processKey = processKey(cliType, userKey);
         lastClaudeAssistantTexts.remove(processKey);
+        codexStreamedLengths.remove(processKey);
         stop(cliType, userKey);
 
         try {
@@ -329,6 +334,7 @@ public class AiCliExecutor {
                     cancelTimeout(timeoutFuture);
                     runningRemoteCommands.remove(processKey);
                     lastClaudeAssistantTexts.remove(processKey);
+                    codexStreamedLengths.remove(processKey);
                     if (handle != null && handle.isRunning()) {
                         handle.stop();
                     }
@@ -360,6 +366,7 @@ public class AiCliExecutor {
     public boolean stop(CliType cliType, String userKey) {
         String processKey = processKey(cliType, userKey);
         lastClaudeAssistantTexts.remove(processKey);
+        codexStreamedLengths.remove(processKey);
         Process process = runningProcesses.remove(processKey);
         if (process != null && process.isAlive()) {
             process.destroyForcibly();
@@ -395,6 +402,7 @@ public class AiCliExecutor {
         });
         userSessionIds.keySet().removeIf(key -> belongsToBotType(key, botType));
         lastClaudeAssistantTexts.keySet().removeIf(key -> belongsToBotType(key, botType));
+        codexStreamedLengths.keySet().removeIf(key -> belongsToBotType(key, botType));
     }
 
     /** 停止指定用户的所有 AI 任务（本机与远端）。 */
@@ -673,19 +681,54 @@ public class AiCliExecutor {
             }
 
             switch (type) {
+                case "item.started" -> {
+                    // 工具调用开始时展示工具名称，让用户知道 AI 正在操作。
+                    JsonNode item = node.path("item");
+                    String itemType = item.path("type").asText("");
+                    if ("tool_call".equals(itemType)) {
+                        String toolName = item.path("name").asText("");
+                        String args = item.path("arguments").asText("");
+                        if (!toolName.isBlank()) {
+                            String summary = formatCodexToolStart(toolName, args);
+                            callback.accept("⎡🔧 " + summary + "⎦");
+                        }
+                    }
+                }
+                case "item.updated" -> {
+                    // agent_message 流式增量推送：只发送新增部分，避免重复。
+                    JsonNode item = node.path("item");
+                    String itemType = item.path("type").asText("");
+                    if ("agent_message".equals(itemType)) {
+                        String text = item.path("text").asText("");
+                        if (!text.isBlank()) {
+                            int lastLen = codexStreamedLengths.getOrDefault(processKey, 0);
+                            if (text.length() > lastLen) {
+                                String delta = text.substring(lastLen);
+                                if (!delta.isBlank()) {
+                                    callback.accept(delta);
+                                }
+                                codexStreamedLengths.put(processKey, text.length());
+                            }
+                        }
+                    }
+                }
                 case "item.completed" -> {
                     JsonNode item = node.path("item");
                     String itemType = item.path("type").asText("");
                     String text = item.path("text").asText("");
                     if (!text.isBlank()) {
-                        // item.completed 是最终可展示内容，按语义打前缀便于聊天界面快速区分。
-                        String prefix = switch (itemType) {
-                            case "agent_message" -> "🤖 ";
-                            case "tool_call" -> "🔧 ";
-                            default -> "📝 ";
-                        };
-                        callback.accept(prefix + text);
+                        // 如果已通过 item.updated 流式发送过，只补发剩余部分。
+                        int lastLen = codexStreamedLengths.getOrDefault(processKey, 0);
+                        String toSend = lastLen > 0 ? text.substring(Math.min(lastLen, text.length())) : text;
+                        if (!toSend.isBlank()) {
+                            if ("tool_call".equals(itemType)) {
+                                callback.accept("⎡🔧 " + toSend + "⎦");
+                            } else {
+                                callback.accept(toSend);
+                            }
+                        }
                     }
+                    codexStreamedLengths.remove(processKey);
                 }
                 case "turn.completed" -> {
                     // turn 完成时附带 token 用量，便于用户了解一次请求消耗。
@@ -695,7 +738,7 @@ public class AiCliExecutor {
                         int output = usage.path("output_tokens").asInt(0);
                         int cached = usage.path("cached_input_tokens").asInt(0);
                         callback.accept(String.format(
-                                "📊 Token: 输入=%d (缓存=%d), 输出=%d",
+                                "— Token: 输入=%d (缓存=%d), 输出=%d",
                                 input, cached, output));
                     }
                 }
@@ -744,14 +787,14 @@ public class AiCliExecutor {
                                 && normalizedResult.equals(normalizedAssistant);
                     }
                     if (!duplicatedWithAssistant && !result.isBlank() && result.length() <= 4000) {
-                        callback.accept("📋 " + result);
+                        callback.accept(result);
                     }
                     // 用量信息
                     JsonNode usage = node.path("usage");
                     if (!usage.isMissingNode()) {
                         int input = usage.path("input_tokens").asInt(0);
                         int output = usage.path("output_tokens").asInt(0);
-                        callback.accept(String.format("📊 Token: 输入=%d, 输出=%d", input, output));
+                        callback.accept(String.format("— Token: 输入=%d, 输出=%d", input, output));
                     }
                 }
                 default -> {
@@ -823,7 +866,7 @@ public class AiCliExecutor {
             JsonNode input = block.path("input");
             String summary = formatToolCall(toolName, input);
             if (!summary.isBlank()) {
-                callback.accept("🔧 " + summary);
+                callback.accept("⎡🔧 " + summary + "⎦");
             }
             return "";
         }
@@ -833,7 +876,7 @@ public class AiCliExecutor {
                 text = block.path("content").asText("");
             }
             if (!text.isBlank()) {
-                callback.accept("🤖 " + text);
+                callback.accept(text);
                 return text;
             }
         }
@@ -865,6 +908,33 @@ public class AiCliExecutor {
     /** 对长字符串做安全截断，避免消息输出过长。 */
     private String truncate(String text, int maxLen) {
         return text.length() > maxLen ? text.substring(0, maxLen) + "..." : text;
+    }
+
+    /** 格式化 Codex tool_call 启动时的简要描述（从 item.started 事件中提取）。 */
+    private String formatCodexToolStart(String toolName, String arguments) {
+        String label = switch (toolName) {
+            case "shell" -> "执行命令";
+            case "read_file" -> "读取文件";
+            case "write_file" -> "写入文件";
+            case "apply_diff" -> "应用修改";
+            case "list_dir" -> "列出目录";
+            default -> toolName;
+        };
+        if (arguments == null || arguments.isBlank()) {
+            return label;
+        }
+        // 尝试从 arguments JSON 中提取关键参数
+        try {
+            JsonNode args = MAPPER.readTree(arguments);
+            String detail = args.path("command").asText(
+                    args.path("path").asText(
+                            args.path("file_path").asText("")));
+            if (!detail.isBlank()) {
+                return label + ": " + truncate(detail, 150);
+            }
+        } catch (Exception ignored) {
+        }
+        return label;
     }
 
     // ==================== 二进制路径解析 ====================
